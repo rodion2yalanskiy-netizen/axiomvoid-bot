@@ -71,7 +71,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            await progress.edit_text("⬇️ Скачиваю Reel...")
             video_path = await download_video(url, tmpdir)
 
             await progress.edit_text("🎵 Транскрибирую аудио через Whisper...")
