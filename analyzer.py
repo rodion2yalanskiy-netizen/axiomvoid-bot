@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
 """
-analyzer.py — Транскрипция (Groq Whisper) + Анализ (Claude via OpenRouter)
+analyzer.py — Транскрипция (Groq Whisper) + Универсальный анализ (Claude + Perplexity)
+
+Пайплайн:
+  1. extract_audio + transcribe  → текст
+  2. extract_structured_notes    → структурированный конспект (JSON)
+  3. research_topic              → веб-исследование (Perplexity via OpenRouter)
+  4. generate_claude_prompt      → готовый промпт для Claude Code
+  5. refine_content              → правки по запросу пользователя
 """
 
 import os
+import re
+import json
 import asyncio
-import tempfile
 import subprocess
 import requests
 from groq import Groq
 
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+OR_URL     = "https://openrouter.ai/api/v1/chat/completions"
+OR_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "Content-Type": "application/json",
+}
+
+
+# ─── Низкоуровневые утилиты ──────────────────────────────────────────────────
 
 def extract_audio(video_path: str) -> str:
-    """Извлекает аудио из видео, возвращает путь к mp3"""
-    # Работает с любым форматом видео (.mp4, .webm, etc.)
+    """Извлекает аудио из видео любого формата → mp3"""
     base = os.path.splitext(video_path)[0]
     audio_path = base + ".mp3"
     result = subprocess.run([
@@ -28,12 +43,12 @@ def extract_audio(video_path: str) -> str:
         audio_path, "-y", "-loglevel", "error"
     ], capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg ошибка: {result.stderr[:300]}")
+        raise RuntimeError(f"ffmpeg: {result.stderr[:300]}")
     return audio_path
 
 
 def transcribe(audio_path: str) -> str:
-    """Транскрибирует аудио через Groq Whisper (бесплатно)"""
+    """Транскрипция через Groq Whisper"""
     with open(audio_path, "rb") as f:
         result = groq_client.audio.transcriptions.create(
             file=("audio.mp3", f),
@@ -43,75 +58,254 @@ def transcribe(audio_path: str) -> str:
     return result.strip() if result else ""
 
 
-def analyze(transcription: str) -> str:
-    """Анализирует контент через Claude via OpenRouter"""
-
-    if not transcription or len(transcription) < 10:
-        transcription = "[Аудио отсутствует или неразборчиво — анализ по визуальному контексту]"
-
-    prompt = f"""Ты — AI-аналитик для студии укладки плитки QSNera (Родион Яланский).
-
-Проанализируй транскрипцию Instagram Reel и создай полезный отчёт.
-
-ТРАНСКРИПЦИЯ:
-{transcription}
-
-Создай отчёт строго в этом формате:
-
-📊 *АНАЛИЗ REELS*
-━━━━━━━━━━━━━━━━━━
-
-*Тема:* [основная тема одной строкой]
-
-*Ключевые инсайты:*
-1. [инсайт]
-2. [инсайт]
-3. [инсайт]
-
-*Применимость для QSNera:*
-✅ [что уже применяем или легко внедрить]
-⚠️ [что требует ресурсов/времени]
-🆕 [новые идеи для бизнеса]
-
-*Оценка:* [X/10] — [одна строка вывода]
-
-💡 *ПРОМПТ ДЛЯ САМОРАЗВИТИЯ:*
-_"[конкретный промпт для углублённого изучения — начни с глагола]"_"""
-
-    resp = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "HTTP-Referer": "https://t.me/Improvement_for_mi_bot",
-            "X-Title": "QSNera Reels Bot",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "anthropic/claude-sonnet-4-5",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 800,
-        },
-        timeout=60,
-    )
+def _call_openrouter(messages: list, model="anthropic/claude-sonnet-4-5", max_tokens=3000) -> str:
+    resp = requests.post(OR_URL, headers=OR_HEADERS, json={
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }, timeout=90)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
 
 
-async def analyze_reel(video_path: str) -> str:
-    """Полный пайплайн: видео → транскрипция → анализ"""
-    loop = asyncio.get_event_loop()
+# ─── Шаг 1: Структурированный конспект ──────────────────────────────────────
 
-    # Извлекаем аудио
-    audio_path = await loop.run_in_executor(None, extract_audio, video_path)
+def extract_structured_notes(transcript: str) -> dict:
+    """
+    Извлекает ВСЮ полезную информацию из транскрипции — без привязки к теме.
+    Возвращает dict с полями topic, summary, steps, tools, technologies,
+    commands, services, key_details, search_query.
+    """
+    if not transcript or len(transcript) < 10:
+        transcript = "[Речь отсутствует или неразборчива]"
+
+    prompt = f"""Проанализируй транскрипцию Instagram Reel. Извлеки ВСЮ полезную информацию — \
+независимо от темы (технологии, бизнес, лайфстайл, обучение — любая тема).
+
+ТРАНСКРИПЦИЯ:
+{transcript}
+
+Верни ТОЛЬКО валидный JSON (без markdown, без пояснений):
+{{
+  "topic": "краткая тема (до 10 слов)",
+  "summary": "суть за 2-3 предложения",
+  "steps": ["шаг 1", "шаг 2"],
+  "tools": ["инструмент 1"],
+  "technologies": ["технология 1"],
+  "commands": ["команда/инструкция 1"],
+  "services": ["сервис/платформа 1"],
+  "key_details": ["важная деталь 1"],
+  "search_query": "поисковый запрос для углублённого изучения"
+}}
+
+Если поле пустое — оставь []. Не добавляй комментарии вне JSON."""
+
+    response = _call_openrouter([{"role": "user", "content": prompt}])
+
+    # Вычищаем JSON из ответа
+    text = response.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text.rstrip())
+    try:
+        return json.loads(text)
+    except Exception:
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+    # Fallback
+    return {
+        "topic": "Анализ Reel",
+        "summary": transcript[:300],
+        "steps": [], "tools": [], "technologies": [],
+        "commands": [], "services": [], "key_details": [],
+        "search_query": "информация из видео"
+    }
+
+
+# ─── Шаг 2: Веб-исследование ────────────────────────────────────────────────
+
+def research_topic(notes: dict) -> str:
+    """
+    Веб-исследование через Perplexity/Sonar (OpenRouter).
+    Fallback: Claude с базой знаний.
+    """
+    topic        = notes.get("topic", "")
+    search_query = notes.get("search_query", topic)
+    tools        = ", ".join(notes.get("tools", []) + notes.get("technologies", []))
+    steps        = "; ".join(notes.get("steps", []))
+
+    prompt = f"""Тема из Reel: {topic}
+Инструменты/технологии: {tools or "не указаны"}
+Шаги из Reel: {steps or "не указаны"}
+Поисковый запрос: {search_query}
+
+Проведи исследование и найди:
+1. Как это работает на практике (реальный опыт, форумы, Reddit, GitHub)
+2. Подводные камни и частые ошибки, которых нет в Reel
+3. Актуальность информации — устарела ли
+4. Лучшие альтернативы или улучшения
+5. Ссылки на ключевые ресурсы (документация, репозитории, статьи)
+
+Ответь структурированно, кратко, на русском."""
+
+    # Пробуем Perplexity с реальным поиском
+    for model in ("perplexity/sonar", "perplexity/sonar-pro"):
+        try:
+            return _call_openrouter(
+                [{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=2000
+            )
+        except Exception:
+            continue
+
+    # Fallback: Claude без веб-поиска
+    fallback = f"""На основе своих знаний расскажи о теме: "{search_query}"
+Инструменты: {tools}
+
+Структурируй:
+- Подводные камни и ошибки
+- Актуальность и альтернативы
+- Практические советы
+- Полезные ресурсы
+
+Кратко, на русском."""
+    return _call_openrouter([{"role": "user", "content": fallback}])
+
+
+# ─── Шаг 3: Генерация промпта для Claude Code ────────────────────────────────
+
+def generate_claude_prompt(notes: dict, research: str) -> str:
+    """Формирует готовый промпт для выполнения в Claude Code"""
+
+    notes_text = json.dumps(notes, ensure_ascii=False, indent=2)
+
+    prompt = f"""На основе анализа Reel и веб-исследования сформируй готовый промпт для Claude Code.
+
+ДАННЫЕ ИЗ REEL:
+{notes_text}
+
+РЕЗУЛЬТАТЫ ВЕБ-ИССЛЕДОВАНИЯ:
+{research}
+
+Напиши промпт в формате:
+
+## 🎯 Задача
+[чёткое описание — что нужно сделать]
+
+## 📦 Что установить
+```bash
+[команды установки — если применимо]
+```
+
+## 📋 Шаги реализации
+[нумерованный список пошаговых действий]
+
+## 🗂 Структура проекта
+[файлы и папки — если применимо]
+
+## ⚙️ Конфигурация и настройки
+[ключевые параметры, переменные окружения — если применимо]
+
+## ✅ Ожидаемый результат
+[что должно получиться на выходе]
+
+---
+Если тема не требует кода — адаптируй формат: убери секции про установку/структуру, \
+добавь план действий / список ресурсов / чек-лист.
+
+Промпт должен быть самодостаточным — готов к прямому использованию без пояснений."""
+
+    return _call_openrouter([{"role": "user", "content": prompt}], max_tokens=2000)
+
+
+# ─── Шаг 5 (Edit): Доработка по запросу пользователя ────────────────────────
+
+def refine_content(notes: dict, research: str, current_prompt: str, correction: str) -> tuple[dict, str]:
+    """
+    Пересматривает конспект и промпт с учётом правки пользователя.
+    Возвращает (обновлённые notes, обновлённый промпт).
+    """
+    notes_json = json.dumps(notes, ensure_ascii=False, indent=2)
+
+    prompt = f"""Пользователь хочет внести правки в анализ Reel.
+
+ТЕКУЩИЙ КОНСПЕКТ (JSON):
+{notes_json}
+
+ТЕКУЩИЙ ПРОМПТ:
+{current_prompt}
+
+ПРАВКА ПОЛЬЗОВАТЕЛЯ:
+{correction}
+
+ВЕБ-ИССЛЕДОВАНИЕ (для контекста):
+{research[:500]}...
+
+Обнови конспект и промпт с учётом правки. Верни ТОЛЬКО валидный JSON:
+{{
+  "notes": {{ ...обновлённый конспект со всеми полями... }},
+  "prompt": "...обновлённый промпт..."
+}}"""
+
+    response = _call_openrouter([{"role": "user", "content": prompt}], max_tokens=3000)
+
+    text = response.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text.rstrip())
 
     try:
-        # Транскрибируем
-        transcription = await loop.run_in_executor(None, transcribe, audio_path)
+        data = json.loads(text)
+        return data.get("notes", notes), data.get("prompt", current_prompt)
+    except Exception:
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group())
+                return data.get("notes", notes), data.get("prompt", current_prompt)
+            except Exception:
+                pass
+    return notes, current_prompt
 
-        # Анализируем
-        report = await loop.run_in_executor(None, analyze, transcription)
-        return report
 
-    finally:
-        if os.path.exists(audio_path):
-            os.unlink(audio_path)
+# ─── Форматирование для Telegram ─────────────────────────────────────────────
+
+def format_notes_telegram(notes: dict, research: str) -> str:
+    """Форматирует конспект + исследование для отправки в Telegram"""
+    parts = []
+
+    parts.append(f"📋 *Конспект Reel*\n\n🎯 *Тема:* {notes.get('topic', '—')}")
+
+    if notes.get("summary"):
+        parts.append(f"\n📝 *Суть:*\n{notes['summary']}")
+
+    if notes.get("steps"):
+        steps = "\n".join(f"{i+1}\\. {s}" for i, s in enumerate(notes["steps"]))
+        parts.append(f"\n📌 *Шаги:*\n{steps}")
+
+    tools = notes.get("tools", []) + notes.get("technologies", [])
+    if tools:
+        parts.append(f"\n🛠 *Инструменты/технологии:* {', '.join(tools)}")
+
+    if notes.get("commands"):
+        cmds = "\n".join(f"• `{c}`" for c in notes["commands"])
+        parts.append(f"\n⚙️ *Команды:*\n{cmds}")
+
+    if notes.get("services"):
+        parts.append(f"\n🔗 *Сервисы/платформы:* {', '.join(notes['services'])}")
+
+    if notes.get("key_details"):
+        details = "\n".join(f"• {d}" for d in notes["key_details"])
+        parts.append(f"\n💡 *Важные детали:*\n{details}")
+
+    if research:
+        # Обрезаем если слишком длинный
+        r = research if len(research) < 1500 else research[:1500] + "..."
+        parts.append(f"\n\n🔍 *Проверено на практике:*\n{r}")
+
+    return "\n".join(parts)
