@@ -163,8 +163,23 @@ async def handle_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(report, parse_mode="Markdown")
 
 
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирует ошибки не падая"""
+    from telegram.error import Conflict, NetworkError
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.warning("Конфликт polling — другой экземпляр ещё работает, подождите...")
+    elif isinstance(err, NetworkError):
+        logger.warning(f"Сетевая ошибка: {err}")
+    else:
+        logger.error(f"Необработанная ошибка: {err}")
+
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Обработчик ошибок
+    app.add_error_handler(handle_error)
 
     # Команды
     from telegram.ext import CommandHandler
