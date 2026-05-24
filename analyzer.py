@@ -18,13 +18,17 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 def extract_audio(video_path: str) -> str:
     """Извлекает аудио из видео, возвращает путь к mp3"""
-    audio_path = video_path.replace(".mp4", ".mp3")
-    subprocess.run([
+    # Работает с любым форматом видео (.mp4, .webm, etc.)
+    base = os.path.splitext(video_path)[0]
+    audio_path = base + ".mp3"
+    result = subprocess.run([
         "ffmpeg", "-i", video_path,
         "-vn", "-acodec", "mp3",
         "-ar", "16000", "-ac", "1", "-b:a", "64k",
-        audio_path, "-y", "-loglevel", "quiet"
-    ], check=True)
+        audio_path, "-y", "-loglevel", "error"
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg ошибка: {result.stderr[:300]}")
     return audio_path
 
 
