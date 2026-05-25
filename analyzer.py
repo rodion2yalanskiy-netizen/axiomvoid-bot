@@ -8,6 +8,9 @@ analyzer.py — Транскрипция (Groq Whisper) + Универсальн
   3. research_topic              → веб-исследование (Perplexity via OpenRouter)
   4. generate_claude_prompt      → готовый промпт для Claude Code
   5. refine_content              → правки по запросу пользователя
+  6. chat_with_claude            → многоходовой чат
+  7. analyze_image_in_chat       → анализ фото в диалоге
+  8. generate_chat_summary       → конспект диалога для Obsidian
 """
 
 import os
@@ -16,6 +19,7 @@ import json
 import asyncio
 import subprocess
 import requests
+from datetime import datetime
 from groq import Groq
 
 GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
@@ -58,7 +62,7 @@ def transcribe(audio_path: str) -> str:
     return result.strip() if result else ""
 
 
-def _call_openrouter(messages: list, model="anthropic/claude-sonnet-4-5", max_tokens=3000) -> str:
+def _call_openrouter(messages: list, model="anthropic/claude-sonnet-4-6", max_tokens=3000) -> str:
     resp = requests.post(OR_URL, headers=OR_HEADERS, json={
         "model": model,
         "messages": messages,
@@ -376,3 +380,122 @@ def classify_note(text: str) -> dict:
         "title": text[:50],
         "type": "note"
     }
+
+
+# ─── Claude Chat ──────────────────────────────────────────────────────────────
+
+def chat_with_claude(messages: list, system_prompt: str = None, max_tokens: int = 2000) -> str:
+    """
+    Многоходовой чат с Claude через OpenRouter.
+    messages: [{"role": "user"/"assistant", "content": "..."}]
+    system_prompt: системный промпт — добавляется первым сообщением, не хранится в истории
+    """
+    full_messages = []
+    if system_prompt:
+        full_messages.append({"role": "system", "content": system_prompt})
+    full_messages.extend(messages)
+    return _call_openrouter(full_messages, max_tokens=max_tokens)
+
+
+def analyze_image_in_chat(image_base64: str, question: str, chat_history: list = None) -> tuple:
+    """
+    Анализирует изображение в рамках диалога с Claude Vision (OpenRouter).
+    Возвращает (ответ: str, user_message: dict — для добавления в историю).
+    """
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+        },
+        {
+            "type": "text",
+            "text": question or "Что ты видишь на этом изображении? Опиши подробно."
+        }
+    ]
+    user_message = {"role": "user", "content": content}
+
+    full_messages = list(chat_history or []) + [user_message]
+
+    resp = requests.post(OR_URL, headers=OR_HEADERS, json={
+        "model": "anthropic/claude-sonnet-4-6",
+        "messages": full_messages,
+        "max_tokens": 2000,
+    }, timeout=90)
+    resp.raise_for_status()
+    response = resp.json()["choices"][0]["message"]["content"]
+
+    return response, user_message
+
+
+def generate_chat_summary(chat_history: list, chat_date: str = None) -> str:
+    """
+    Генерирует структурированный конспект диалога с Claude.
+    Возвращает текст в формате Markdown.
+    """
+    if not chat_history:
+        return "# Пустой диалог\n\n*Сообщений не было.*"
+
+    date_str = chat_date or datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # Формируем читаемый текст диалога
+    convo_parts = []
+    for msg in chat_history:
+        role = "👤 **Родион**" if msg["role"] == "user" else "🤖 **Claude**"
+        content = msg.get("content", "")
+
+        if isinstance(content, list):
+            text_parts = []
+            has_image = False
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        has_image = True
+            text = " ".join(filter(None, text_parts))
+            if has_image:
+                text = f"[📷 Фото] {text}" if text else "[📷 Фото]"
+            content = text
+
+        if content:
+            convo_parts.append(f"{role}: {content}")
+
+    convo_text = "\n\n".join(convo_parts)
+
+    # Обрезаем если слишком длинный (лимит контекста)
+    if len(convo_text) > 12000:
+        convo_text = convo_text[:12000] + "\n\n_...[диалог обрезан для краткости]..._"
+
+    msg_count = sum(1 for m in chat_history if m["role"] == "user")
+
+    summary_prompt = f"""Создай структурированный конспект следующего диалога Родиона с Claude.
+
+ДИАЛОГ (дата: {date_str}, сообщений от пользователя: {msg_count}):
+---
+{convo_text}
+---
+
+Напиши конспект строго в Markdown. Включи все разделы:
+
+## 🎯 Тема разговора
+[1-2 предложения о чём был разговор]
+
+## 💡 Ключевые идеи и решения
+[маркированный список важных моментов, идей, выводов]
+
+## ✅ Задачи и следующие шаги
+[конкретные действия по итогам — если обсуждались]
+
+## 📚 Полезная информация
+[факты, советы, данные из разговора — если есть]
+
+---
+
+## 📝 Полный диалог
+
+{convo_text}
+
+---
+*Сохранено: {date_str} · Сообщений: {msg_count}*"""
+
+    return _call_openrouter([{"role": "user", "content": summary_prompt}], max_tokens=4000)

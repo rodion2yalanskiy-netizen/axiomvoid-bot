@@ -10,7 +10,7 @@ Obsidian структура:
   Личная жизнь:   Цели.md | Дневник/ | Автономный доход/
 """
 
-import os, re, logging, asyncio, base64, tempfile
+import os, re, logging, asyncio, base64, tempfile, subprocess
 from datetime import datetime
 
 import requests
@@ -24,7 +24,8 @@ from analyzer import (
     extract_audio, transcribe,
     extract_structured_notes, research_topic,
     generate_claude_prompt, refine_content,
-    format_notes_telegram, classify_note
+    format_notes_telegram, classify_note,
+    chat_with_claude, analyze_image_in_chat, generate_chat_summary,
 )
 from downloader import download_video
 
@@ -48,10 +49,22 @@ DEFAULT_REPO = "rodion2yalanskiy-netizen/qsnera-vault"
 
 # ─── Сессии ─────────────────────────────────────────────────────────────────
 # state: "reel_confirming" | "reel_editing" | "note_confirming" | "note_editing"
+#        "agent_selecting" | "note_editing_folder" | "claude_chat"
 user_sessions: dict = {}
 
 # Кеш списка отчётов для inline-кнопок (user_id -> list of file dicts)
 report_cache: dict = {}
+
+# ─── Системный промпт для чата ────────────────────────────────────────────────
+SYSTEM_PROMPT_CHAT = (
+    "Ты — AI-помощник Родиона Яланского, владельца студии QSNera "
+    "(укладка премиум-плитки, мрамор, натуральный камень, ручная работа).\n"
+    "Помогай с бизнес-вопросами, анализом фото и видео плитки/дизайна, "
+    "идеями для контента, техническими задачами.\n"
+    "Отвечай по-русски, кратко и конкретно. "
+    "Если тебе присылают фото плитки или дизайна интерьера — анализируй профессионально. "
+    "Диалог ведётся через Telegram."
+)
 
 # ─── Агенты ──────────────────────────────────────────────────────────────────
 AGENTS = {
@@ -865,14 +878,26 @@ async def handle_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    from telegram.error import Conflict, NetworkError
+    import traceback
+    from telegram.error import Conflict, NetworkError, TimedOut
     err = context.error
     if isinstance(err, Conflict):
         logger.warning("Конфликт polling")
-    elif isinstance(err, NetworkError):
-        logger.warning(f"Сетевая ошибка: {err}")
-    else:
-        logger.error(f"Ошибка: {err}")
+        return
+    if isinstance(err, (NetworkError, TimedOut)):
+        logger.warning(f"Сетевая ошибка (временная): {err}")
+        return
+    # Критическая ошибка — логируем и сразу отправляем в Telegram
+    tb = "".join(traceback.format_exception(None, err, err.__traceback__))
+    logger.error(f"Критическая ошибка: {tb}")
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"⚠️ *Бот: критическая ошибка*\n\n```\n{tb[:3000]}\n```",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass  # Если Telegram тоже недоступен — не падаем рекурсивно
 
 
 # ─── Вспомогательные ─────────────────────────────────────────────────────────
