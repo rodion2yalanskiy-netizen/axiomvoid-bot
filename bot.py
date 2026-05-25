@@ -50,6 +50,9 @@ DEFAULT_REPO = "rodion2yalanskiy-netizen/qsnera-vault"
 # state: "reel_confirming" | "reel_editing" | "note_confirming" | "note_editing"
 user_sessions: dict = {}
 
+# Кеш списка отчётов для inline-кнопок (user_id -> list of file dicts)
+report_cache: dict = {}
+
 
 # ─── Клавиатуры ─────────────────────────────────────────────────────────────
 
@@ -116,6 +119,44 @@ vault: {vault}
     return github_create_file(repo, path, note_content, f"note: {safe_title}")
 
 
+def github_get_reports(limit: int = 7) -> list:
+    """Получает список последних отчётов из папки ✅ Отчёты/ на GitHub."""
+    import urllib.parse
+    if not GITHUB_TOKEN:
+        return []
+    folder = "✅ Отчёты"
+    url = f"https://api.github.com/repos/{DEFAULT_REPO}/contents/{urllib.parse.quote(folder)}"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+        files = [f for f in resp.json() if isinstance(f, dict) and f.get("type") == "file" and f["name"].endswith(".md")]
+        files.sort(key=lambda x: x["name"], reverse=True)
+        return files[:limit]
+    except Exception as e:
+        logger.warning(f"github_get_reports error: {e}")
+        return []
+
+
+def github_get_file_content(path: str) -> str:
+    """Загружает содержимое файла из GitHub (декодирует из base64)."""
+    import urllib.parse
+    if not GITHUB_TOKEN:
+        return ""
+    url = f"https://api.github.com/repos/{DEFAULT_REPO}/contents/{urllib.parse.quote(path)}"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return ""
+        raw_content = resp.json().get("content", "")
+        return base64.b64decode(raw_content).decode("utf-8")
+    except Exception as e:
+        logger.warning(f"github_get_file_content error: {e}")
+        return ""
+
+
 def send_task_to_claude_code(title: str, task_text: str) -> bool:
     """Создаёт задачу для Claude Code в папке 📝 Задачи/."""
     safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', title, flags=re.UNICODE)[:50].strip()
@@ -146,12 +187,15 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *QSNera AI Bot*\n\n"
         "Я умею:\n\n"
         "📝 *Создавать заметки* — просто напиши что угодно текстом, я пойму куда сохранить\n"
-        "🎬 *Анализировать Reels* — пришли ссылку на Instagram или само видео\n\n"
+        "🎬 *Анализировать Reels* — пришли ссылку на Instagram или само видео\n"
+        "⚡ *Создавать задачи* — /задача что нужно сделать\n"
+        "📋 *Читать отчёты* — /отчёты\n\n"
         "Примеры:\n"
         "• _«Встреча с клиентом Петровым, хочет мрамор»_ → заметка в Клиенты/\n"
         "• _«Идея: сделать видео про укладку мрамора»_ → заметка в Маркетинг/\n"
-        "• instagram.com/reel/... → анализ Reel + промпт для Claude Code\n\n"
-        "Команды: /help /myid /test",
+        "• instagram.com/reel/... → анализ Reel + промпт для Claude Code\n"
+        "• /задача Напиши коммерческое предложение → отчёт придёт сюда\n\n"
+        "Команды: /help /задача /отчёты /myid /test",
         parse_mode="Markdown"
     )
 
@@ -159,14 +203,16 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Как пользоваться:*\n\n"
         "*Заметки:* просто напиши текст → бот предложит куда сохранить\n"
-        "*Задача для Claude Code:* начни с «задача:» или «сделай:»\n"
+        "*Задача для Claude Code:* `/задача что сделать`\n"
+        "  или начни текст с _«задача:»_ или _«сделай:»_\n"
+        "*Посмотреть отчёты:* `/отчёты` — список прямо здесь\n"
         "*Reels:* пришли ссылку instagram.com/reel/...\n\n"
         "*Хранилища:*\n"
         "🏢 Бизнес QSNera — клиенты, задачи, сайт, маркетинг\n"
         "🧠 Цифровой мозг — техника, знания\n"
         "🏠 Личная жизнь — цели, дневник\n\n"
         "/myid — твой Telegram ID\n"
-        "/test — диагностика",
+        "/test — диагностика системы",
         parse_mode="Markdown"
     )
 
@@ -399,6 +445,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
     await query.answer()
     data    = query.data or ""
+
+    # ── Просмотр отчёта (не требует активной сессии) ──
+    if data.startswith("rpt_view:"):
+        idx = int(data.split(":")[1])
+        uid = update.effective_user.id
+        reports = report_cache.get(uid, [])
+        if not reports or idx >= len(reports):
+            await query.message.reply_text("⚠️ Список устарел. Используй /отчёты снова.")
+            return
+        report = reports[idx]
+        await query.message.reply_text("📖 Загружаю отчёт...")
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(None, github_get_file_content, report["path"])
+        if not raw:
+            await query.message.reply_text("❌ Не удалось загрузить отчёт.")
+            return
+        # Убираем frontmatter
+        body = raw
+        if raw.startswith("---"):
+            fm_parts = raw.split("---", 2)
+            if len(fm_parts) >= 3:
+                body = fm_parts[2].strip()
+        name = report["name"].replace("Отчёт: ", "").replace(".md", "")
+        out = f"📋 *{name}*\n\n{body}"
+        if len(out) > 4000:
+            out = out[:3950] + "\n\n_...обрезано — смотри полный отчёт в Obsidian_"
+        try:
+            await query.message.reply_text(out, parse_mode="Markdown")
+        except Exception:
+            await query.message.reply_text(out)
+        return
+
     parts   = data.split(":", 1)
     action  = parts[0]
     user_id = int(parts[1]) if len(parts) > 1 else update.effective_user.id
@@ -516,6 +594,72 @@ async def handle_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("📊 *Диагностика:*\n\n" + "\n".join(results), parse_mode="Markdown")
 
 
+async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/отчёты — показывает последние отчёты из Obsidian прямо в Telegram."""
+    user_id = update.effective_user.id
+    msg = await update.message.reply_text("📋 Загружаю отчёты из Obsidian...")
+
+    loop = asyncio.get_event_loop()
+    reports = await loop.run_in_executor(None, github_get_reports)
+
+    if not reports:
+        await msg.edit_text(
+            "📭 *Отчётов пока нет*\n\n"
+            "Создай задачу через /задача или Reels — отчёт придёт автоматически.",
+            parse_mode="Markdown"
+        )
+        return
+
+    report_cache[user_id] = reports
+
+    buttons = []
+    for i, r in enumerate(reports):
+        name = r["name"].replace("Отчёт: ", "").replace(".md", "")
+        if len(name) > 38:
+            name = name[:35] + "..."
+        buttons.append([InlineKeyboardButton(f"📄 {name}", callback_data=f"rpt_view:{i}")])
+
+    await msg.edit_text(
+        "📋 *Последние отчёты:*\nНажми чтобы прочитать прямо здесь:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+    )
+
+
+async def handle_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/задача [текст] — создаёт задачу для Claude Code напрямую."""
+    text = " ".join(context.args).strip() if context.args else ""
+
+    if not text:
+        await update.message.reply_text(
+            "⚡ *Создать задачу для Claude Code:*\n\n"
+            "Укажи задачу после команды:\n"
+            "`/задача Проанализируй конкурентов в укладке плитки`\n\n"
+            "Или напиши текст начиная с _«задача:»_ или _«сделай:»_",
+            parse_mode="Markdown"
+        )
+        return
+
+    lines = text.strip().split("\n")
+    title = lines[0][:60].strip()
+
+    msg = await update.message.reply_text(f"⚡ Создаю задачу: *{title}*...", parse_mode="Markdown")
+
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(None, send_task_to_claude_code, title, text)
+
+    if success:
+        await msg.edit_text(
+            f"✅ *Задача создана!*\n\n"
+            f"📌 *{title}*\n\n"
+            f"🤖 Claude Code выполнит за ~2 мин\n"
+            f"📱 Отчёт придёт сюда автоматически",
+            parse_mode="Markdown"
+        )
+    else:
+        await msg.edit_text("❌ Ошибка создания задачи. Проверь GITHUB\_TOKEN.")
+
+
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     from telegram.error import Conflict, NetworkError
     err = context.error
@@ -559,10 +703,14 @@ def _save_chat_id_to_railway(chat_id: int) -> bool:
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_error_handler(handle_error)
-    app.add_handler(CommandHandler("start", handle_start))
-    app.add_handler(CommandHandler("help",  handle_help))
-    app.add_handler(CommandHandler("myid",  handle_myid))
-    app.add_handler(CommandHandler("test",  handle_test))
+    app.add_handler(CommandHandler("start",   handle_start))
+    app.add_handler(CommandHandler("help",    handle_help))
+    app.add_handler(CommandHandler("myid",    handle_myid))
+    app.add_handler(CommandHandler("test",    handle_test))
+    app.add_handler(CommandHandler("отчёты",  handle_reports))
+    app.add_handler(CommandHandler("reports", handle_reports))
+    app.add_handler(CommandHandler("задача",  handle_task_command))
+    app.add_handler(CommandHandler("task",    handle_task_command))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
