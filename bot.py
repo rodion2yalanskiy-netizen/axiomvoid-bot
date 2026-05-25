@@ -53,6 +53,45 @@ user_sessions: dict = {}
 # Кеш списка отчётов для inline-кнопок (user_id -> list of file dicts)
 report_cache: dict = {}
 
+# ─── Агенты ──────────────────────────────────────────────────────────────────
+AGENTS = {
+    "code": {
+        "btn":   "🤖 Claude Code",
+        "title": "Claude Code (Mac)",
+        "desc":  "Код, файлы, скрипты, анализ через Claude на твоём Mac",
+        "time":  "~2–10 мин",
+        "icon":  "🤖",
+    },
+    "openrouter": {
+        "btn":   "🧠 Анализ / Текст",
+        "title": "OpenRouter — Claude Sonnet",
+        "desc":  "Текст, анализ, написание, структурирование через облако",
+        "time":  "~1–3 мин",
+        "icon":  "🧠",
+    },
+    "vision": {
+        "btn":   "👁 Анализ фото",
+        "title": "Vision — Claude Opus",
+        "desc":  "Анализ изображений, скриншотов, фото плитки или дизайна",
+        "time":  "~2–5 мин",
+        "icon":  "👁",
+    },
+    "images": {
+        "btn":   "🎨 Генерация",
+        "title": "Images — FLUX",
+        "desc":  "Генерация изображений по описанию (дизайн, визуализации)",
+        "time":  "~3–7 мин",
+        "icon":  "🎨",
+    },
+    "antigravity": {
+        "btn":   "🌟 Antigravity",
+        "title": "Antigravity — Gemini",
+        "desc":  "Задача передаётся в Antigravity (Gemini) на Mac",
+        "time":  "~2–5 мин",
+        "icon":  "🌟",
+    },
+}
+
 
 # ─── Клавиатуры ─────────────────────────────────────────────────────────────
 
@@ -61,6 +100,23 @@ def reel_keyboard(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✅ Отправить в Claude Code", callback_data=f"reel_confirm:{user_id}"),
         InlineKeyboardButton("✏️ Доработать",             callback_data=f"reel_edit:{user_id}"),
     ]])
+
+def agent_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура выбора агента для выполнения задачи."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(AGENTS["code"]["btn"],        callback_data=f"agt:{user_id}:code"),
+            InlineKeyboardButton(AGENTS["openrouter"]["btn"],  callback_data=f"agt:{user_id}:openrouter"),
+        ],
+        [
+            InlineKeyboardButton(AGENTS["vision"]["btn"],      callback_data=f"agt:{user_id}:vision"),
+            InlineKeyboardButton(AGENTS["images"]["btn"],      callback_data=f"agt:{user_id}:images"),
+        ],
+        [
+            InlineKeyboardButton(AGENTS["antigravity"]["btn"], callback_data=f"agt:{user_id}:antigravity"),
+            InlineKeyboardButton("✏️ Изменить задачу",         callback_data=f"agt:{user_id}:edit"),
+        ],
+    ])
 
 def note_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
@@ -157,15 +213,21 @@ def github_get_file_content(path: str) -> str:
         return ""
 
 
-def send_task_to_claude_code(title: str, task_text: str) -> bool:
-    """Создаёт задачу для Claude Code в папке Задачи/."""
+def send_task_to_claude_code(title: str, task_text: str, tool: str = "code") -> bool:
+    """Создаёт задачу для указанного агента в папке Задачи/. Устаревший интерфейс — используй create_task."""
+    ok, _ = create_task(title, task_text, tool)
+    return ok
+
+
+def create_task(title: str, task_text: str, tool: str = "code") -> tuple:
+    """Создаёт задачу в Задачи/ с указанным tool. Возвращает (success: bool, github_path: str)."""
     safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', title, flags=re.UNICODE)[:50].strip()
     filename  = f"{safe_name} ({datetime.now().strftime('%H%M')}).md"
     path      = f"Задачи/{filename}"
 
     content = f"""---
 type: task
-tool: code
+tool: {tool}
 status: delegated
 task_name: {safe_name}
 date: {datetime.now().strftime('%Y-%m-%d')}
@@ -176,7 +238,44 @@ source: telegram-bot
 
 {task_text}
 """
-    return github_create_file(DEFAULT_REPO, path, content, f"task: {safe_name}")
+    ok = github_create_file(DEFAULT_REPO, path, content, f"task({tool}): {safe_name}")
+    return ok, path
+
+
+def verify_task(path: str, expected_tool: str, expected_title: str) -> dict:
+    """Перечитывает задачу с GitHub и проверяет соответствие запросу."""
+    import urllib.parse, time
+    time.sleep(1)  # Небольшая пауза — GitHub иногда кеширует
+    url = f"https://api.github.com/repos/{DEFAULT_REPO}/contents/{urllib.parse.quote(path)}"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"HTTP {resp.status_code} — файл не найден на GitHub"}
+
+        raw = base64.b64decode(resp.json().get("content", "")).decode("utf-8")
+        actual_tool = ""
+        actual_task = ""
+        actual_status = ""
+        for line in raw.split("\n"):
+            if line.startswith("tool:"):
+                actual_tool = line.split(":", 1)[1].strip()
+            elif line.startswith("task_name:"):
+                actual_task = line.split(":", 1)[1].strip()
+            elif line.startswith("status:"):
+                actual_status = line.split(":", 1)[1].strip()
+
+        return {
+            "ok": True,
+            "tool_match":   actual_tool == expected_tool,
+            "actual_tool":  actual_tool,
+            "actual_task":  actual_task,
+            "actual_status": actual_status,
+            "file_size":    len(raw),
+            "path":         path,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ─── Команды ─────────────────────────────────────────────────────────────────
@@ -188,14 +287,14 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Я умею:\n\n"
         "📝 *Создавать заметки* — просто напиши что угодно текстом, я пойму куда сохранить\n"
         "🎬 *Анализировать Reels* — пришли ссылку на Instagram или само видео\n"
-        "⚡ *Создавать задачи* — /задача что нужно сделать\n"
+        "⚡ *Задача агенту* — /задача + выбор агента\n"
+        "🤖 *Все агенты* — /агенты\n"
         "📋 *Читать отчёты* — /отчёты\n\n"
         "Примеры:\n"
         "• _«Встреча с клиентом Петровым, хочет мрамор»_ → заметка в Клиенты/\n"
-        "• _«Идея: видео про укладку мрамора»_ → заметка в Маркетинг/\n"
-        "• instagram.com/reel/... → анализ Reel + промпт для Claude Code\n"
-        "• /задача Напиши коммерческое предложение → отчёт придёт сюда\n\n"
-        "Команды: /help /задача /отчёты /myid /test",
+        "• _«Задача: напиши коммерческое предложение»_ → выбор агента → отчёт сюда\n"
+        "• instagram.com/reel/... → анализ + промпт для агента\n\n"
+        "Команды: /задача /агенты /отчёты /help /myid",
         parse_mode="Markdown"
     )
 
@@ -203,9 +302,10 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Как пользоваться:*\n\n"
         "*Заметки:* просто напиши текст → бот предложит куда сохранить\n"
-        "*Задача для Claude Code:* `/задача что сделать`\n"
-        "  или начни текст с _«задача:»_ или _«сделай:»_\n"
-        "*Посмотреть отчёты:* `/отчёты` — список прямо здесь\n"
+        "*Задача агенту:* `/задача что сделать` → выбери агента → отчёт придёт сюда\n"
+        "  или напиши текст с _«задача:»_ / _«сделай:»_\n"
+        "*Все агенты:* `/агенты` — описание + кнопки\n"
+        "*Отчёты:* `/отчёты` — последние отчёты прямо здесь\n"
         "*Reels:* пришли ссылку instagram.com/reel/...\n\n"
         "*Хранилища:*\n"
         "🏢 Бизнес QSNera — клиенты, задачи, сайт, маркетинг\n"
@@ -285,19 +385,29 @@ async def _process_note(message, text: str, user_id: int):
         }
 
         vault_emoji = {"Бизнес QSNera": "🏢", "Цифровой мозг": "🧠", "Личная жизнь": "🏠"}.get(vault, "📁")
-        type_label = "⚡ Задача для Claude Code" if note_type == "task" else "📝 Заметка"
+        preview = text[:200] + ("..." if len(text) > 200 else "")
 
-        preview = text[:300] + ("..." if len(text) > 300 else "")
-
-        await progress.edit_text(
-            f"{type_label}\n\n"
-            f"📁 *{vault_emoji} {vault}*\n"
-            f"📂 `{folder}/`\n"
-            f"📄 *{title}*\n\n"
-            f"_{preview}_",
-            parse_mode="Markdown",
-            reply_markup=note_keyboard(user_id)
-        )
+        if note_type == "task":
+            # Задача → показываем выбор агента
+            user_sessions[user_id]["state"] = "agent_selecting"
+            await progress.edit_text(
+                f"⚡ *Задача распознана*\n\n"
+                f"📄 *{title}*\n"
+                f"_{preview}_\n\n"
+                f"*Выбери агента-исполнителя:*",
+                parse_mode="Markdown",
+                reply_markup=agent_keyboard(user_id)
+            )
+        else:
+            # Заметка → обычный флоу
+            await progress.edit_text(
+                f"📝 *Заметка*\n\n"
+                f"📁 *{vault_emoji} {vault}* / `{folder}/`\n"
+                f"📄 *{title}*\n\n"
+                f"_{preview}_",
+                parse_mode="Markdown",
+                reply_markup=note_keyboard(user_id)
+            )
     except Exception as e:
         logger.error(f"classify error: {e}")
         await progress.edit_text(f"❌ Ошибка классификации: {e}")
@@ -445,6 +555,82 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
     await query.answer()
     data    = query.data or ""
+
+    # ── Выбор агента ──────────────────────────────────────────────────────────
+    if data.startswith("agt:"):
+        # Формат: agt:{user_id}:{tool}
+        parts_agt = data.split(":", 2)
+        uid  = int(parts_agt[1]) if len(parts_agt) > 1 else update.effective_user.id
+        tool = parts_agt[2] if len(parts_agt) > 2 else "code"
+        session = user_sessions.get(uid, {})
+
+        if not session or session.get("state") not in ("agent_selecting", "note_confirming"):
+            await query.message.reply_text("⚠️ Сессия истекла. Напиши задачу снова.")
+            return
+
+        # Пользователь нажал «Изменить задачу»
+        if tool == "edit":
+            user_sessions[uid]["state"] = "note_editing"
+            await query.edit_message_reply_markup(None)
+            await query.message.reply_text("✏️ Напиши исправленный текст задачи:")
+            return
+
+        agent_info = AGENTS.get(tool, AGENTS["code"])
+        title      = session.get("title", "Задача")
+        task_text  = session.get("text",  "")
+
+        # Убираем кнопки, показываем прогресс
+        await query.edit_message_reply_markup(None)
+        msg = await query.message.reply_text(
+            f"{agent_info['icon']} Отправляю задачу в *{agent_info['title']}*...",
+            parse_mode="Markdown"
+        )
+
+        # Создаём задачу
+        loop = asyncio.get_event_loop()
+        ok, gh_path = await loop.run_in_executor(None, create_task, title, task_text, tool)
+
+        if not ok:
+            await msg.edit_text("❌ Ошибка создания задачи. Проверь GitHub Token.")
+            return
+
+        # Верификация — перечитываем файл с GitHub
+        await msg.edit_text(f"{agent_info['icon']} Задача создана. Проверяю соответствие...")
+        v = await loop.run_in_executor(None, verify_task, gh_path, tool, title)
+
+        if v.get("ok"):
+            tool_icon   = "✅" if v["tool_match"] else "⚠️"
+            status_icon = "✅" if v["actual_status"] == "delegated" else "⚠️"
+            verify_lines = [
+                f"\n*Проверка соответствия:*",
+                f"{tool_icon} Агент: `{v['actual_tool']}` {'✓ совпадает' if v['tool_match'] else '≠ ожидалось ' + tool}",
+                f"📄 Задача: `{v['actual_task']}`",
+                f"{status_icon} Статус: `{v['actual_status']}`",
+                f"📦 Размер файла: {v['file_size']} байт",
+            ]
+            verify_text = "\n".join(verify_lines)
+
+            await msg.edit_text(
+                f"✅ *Задача отправлена!*\n\n"
+                f"📌 *{title}*\n"
+                f"{agent_info['icon']} Агент: *{agent_info['title']}*\n"
+                f"⏱ Ожидаемое время: {agent_info['time']}\n"
+                f"📱 Отчёт придёт сюда автоматически\n"
+                f"{verify_text}",
+                parse_mode="Markdown"
+            )
+        else:
+            await msg.edit_text(
+                f"✅ *Задача отправлена* (верификация недоступна)\n\n"
+                f"📌 *{title}*\n"
+                f"{agent_info['icon']} *{agent_info['title']}*\n"
+                f"⚠️ Проверка: {v.get('error', 'нет данных')}\n"
+                f"⏱ {agent_info['time']}",
+                parse_mode="Markdown"
+            )
+
+        user_sessions.pop(uid, None)
+        return
 
     # ── Просмотр отчёта (не требует активной сессии) ──
     if data.startswith("rpt_view:"):
@@ -594,6 +780,24 @@ async def handle_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("📊 *Диагностика:*\n\n" + "\n".join(results), parse_mode="Markdown")
 
 
+async def handle_agents_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/агенты — показывает список всех агентов и что они умеют."""
+    user_id = update.effective_user.id
+    lines = ["🤖 *AI Агенты системы QSNera*\n"]
+    for tool, a in AGENTS.items():
+        lines.append(
+            f"{a['icon']} *{a['title']}*\n"
+            f"  _{a['desc']}_\n"
+            f"  ⏱ {a['time']}\n"
+        )
+    lines.append("Чтобы отправить задачу конкретному агенту — используй /задача или напиши _«задача: ...»_")
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=agent_keyboard(user_id)
+    )
+
+
 async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/отчёты — показывает последние отчёты из Obsidian прямо в Telegram."""
     user_id = update.effective_user.id
@@ -627,37 +831,37 @@ async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/задача [текст] — создаёт задачу для Claude Code напрямую."""
+    """/задача [текст] — показывает выбор агента для выполнения задачи."""
     text = " ".join(context.args).strip() if context.args else ""
+    user_id = update.effective_user.id
 
     if not text:
         await update.message.reply_text(
-            "⚡ *Создать задачу для Claude Code:*\n\n"
+            "⚡ *Создать задачу для агента:*\n\n"
             "Укажи задачу после команды:\n"
             "`/задача Проанализируй конкурентов в укладке плитки`\n\n"
-            "Или напиши текст начиная с _«задача:»_ или _«сделай:»_",
+            "Или используй /агенты чтобы узнать что умеет каждый агент.",
             parse_mode="Markdown"
         )
         return
 
-    lines = text.strip().split("\n")
-    title = lines[0][:60].strip()
+    title = text.strip().split("\n")[0][:60].strip()
+    user_sessions[user_id] = {
+        "state":      "agent_selecting",
+        "text":       text,
+        "vault":      "Бизнес QSNera",
+        "folder":     "Задачи",
+        "title":      title,
+        "type":       "task",
+    }
 
-    msg = await update.message.reply_text(f"⚡ Создаю задачу: *{title}*...", parse_mode="Markdown")
-
-    loop = asyncio.get_event_loop()
-    success = await loop.run_in_executor(None, send_task_to_claude_code, title, text)
-
-    if success:
-        await msg.edit_text(
-            f"✅ *Задача создана!*\n\n"
-            f"📌 *{title}*\n\n"
-            f"🤖 Claude Code выполнит за ~2 мин\n"
-            f"📱 Отчёт придёт сюда автоматически",
-            parse_mode="Markdown"
-        )
-    else:
-        await msg.edit_text("❌ Ошибка создания задачи. Проверь GITHUB\_TOKEN.")
+    await update.message.reply_text(
+        f"⚡ *Задача готова*\n\n"
+        f"📄 *{title}*\n\n"
+        f"*Выбери агента-исполнителя:*",
+        parse_mode="Markdown",
+        reply_markup=agent_keyboard(user_id)
+    )
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -711,6 +915,8 @@ def main():
     app.add_handler(CommandHandler("reports", handle_reports))
     app.add_handler(CommandHandler("задача",  handle_task_command))
     app.add_handler(CommandHandler("task",    handle_task_command))
+    app.add_handler(CommandHandler("агенты",  handle_agents_info))
+    app.add_handler(CommandHandler("agents",  handle_agents_info))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
