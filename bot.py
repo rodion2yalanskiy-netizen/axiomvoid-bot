@@ -371,7 +371,7 @@ async def _process_note(message, text: str, user_id: int):
         classification = await loop.run_in_executor(None, classify_note, text)
 
         vault    = classification.get("vault", "Бизнес QSNera")
-        folder   = classification.get("folder", "📝 Задачи")
+        folder   = classification.get("folder", "Задачи")
         title    = classification.get("title", text[:50])
         note_type = classification.get("type", "note")  # "note" или "task"
 
