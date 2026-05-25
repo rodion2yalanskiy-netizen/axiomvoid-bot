@@ -5,9 +5,9 @@ QSNera AI Bot — два режима в одном:
   2. 🎬 REELS:  Instagram ссылка/видео → транскрипция → анализ → промпт → Claude Code
 
 Obsidian структура:
-  Бизнес QSNera:  👥 Клиенты/ | 📝 Задачи/ | ✅ Отчёты/ | 💡 Маркетинг/ | 🏗 Сайт/
-  Цифровой мозг:  🧠 Brain/ | 🔑 API Ключи.md
-  Личная жизнь:   🎯 Цели.md | 📓 Дневник/ | 💰 Автономный доход/
+  Бизнес QSNera:  Клиенты/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/
+  Цифровой мозг:  Brain/ | API Ключи.md
+  Личная жизнь:   Цели.md | Дневник/ | Автономный доход/
 """
 
 import os, re, logging, asyncio, base64, tempfile
@@ -120,11 +120,11 @@ vault: {vault}
 
 
 def github_get_reports(limit: int = 7) -> list:
-    """Получает список последних отчётов из папки ✅ Отчёты/ на GitHub."""
+    """Получает список последних отчётов из папки Отчёты/ на GitHub."""
     import urllib.parse
     if not GITHUB_TOKEN:
         return []
-    folder = "✅ Отчёты"
+    folder = "Отчёты"
     url = f"https://api.github.com/repos/{DEFAULT_REPO}/contents/{urllib.parse.quote(folder)}"
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
     try:
@@ -158,10 +158,10 @@ def github_get_file_content(path: str) -> str:
 
 
 def send_task_to_claude_code(title: str, task_text: str) -> bool:
-    """Создаёт задачу для Claude Code в папке 📝 Задачи/."""
+    """Создаёт задачу для Claude Code в папке Задачи/."""
     safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', title, flags=re.UNICODE)[:50].strip()
     filename  = f"{safe_name} ({datetime.now().strftime('%H%M')}).md"
-    path      = f"📝 Задачи/{filename}"
+    path      = f"Задачи/{filename}"
 
     content = f"""---
 type: task
@@ -192,7 +192,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 *Читать отчёты* — /отчёты\n\n"
         "Примеры:\n"
         "• _«Встреча с клиентом Петровым, хочет мрамор»_ → заметка в Клиенты/\n"
-        "• _«Идея: сделать видео про укладку мрамора»_ → заметка в Маркетинг/\n"
+        "• _«Идея: видео про укладку мрамора»_ → заметка в Маркетинг/\n"
         "• instagram.com/reel/... → анализ Reel + промпт для Claude Code\n"
         "• /задача Напиши коммерческое предложение → отчёт придёт сюда\n\n"
         "Команды: /help /задача /отчёты /myid /test",
@@ -552,9 +552,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(None)
         await query.message.reply_text(
             "📂 *Куда сохранить?* Напиши в формате:\n\n"
-            "`Бизнес QSNera / 👥 Клиенты`\n"
-            "`Личная жизнь / 📓 Дневник`\n"
-            "`Цифровой мозг / 🧠 Brain`",
+            "`Бизнес QSNera / Клиенты`\n"
+            "`Личная жизнь / Дневник`\n"
+            "`Цифровой мозг / Brain`",
             parse_mode="Markdown"
         )
         user_sessions[user_id]["state"] = "note_editing_folder"
