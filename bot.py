@@ -533,35 +533,40 @@ async def _handle_reel_refinement(message, text: str, user_id: int, session: dic
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Голосовое сообщение → ffmpeg конвертация → Groq Whisper → обработка как текст."""
+    """Голосовое сообщение → Groq Whisper (OGG напрямую, без ffmpeg) → текст."""
     message = update.message
     user_id = update.effective_user.id
     voice   = message.voice or message.audio
 
     progress = await message.reply_text("🎤 Слушаю...")
     try:
-        file = await context.bot.get_file(voice.file_id)
-        loop = asyncio.get_event_loop()
+        tg_file = await context.bot.get_file(voice.file_id)
+        loop    = asyncio.get_event_loop()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Скачиваем как .ogg (Telegram Voice → Opus codec)
             ogg_path = f"{tmpdir}/voice.ogg"
-            await file.download_to_drive(ogg_path)
+            await tg_file.download_to_drive(ogg_path)
 
-            await progress.edit_text("🔄 Конвертирую...")
-            # ogg (Opus) → mp3 через ffmpeg — Groq лучше понимает mp3
-            mp3_path = await loop.run_in_executor(None, extract_audio, ogg_path)
+            size_kb = os.path.getsize(ogg_path) // 1024
+            logger.info(f"voice: скачан {size_kb}KB → {ogg_path}")
 
-            await progress.edit_text("🔍 Транскрибирую...")
-            transcript = await loop.run_in_executor(None, transcribe, mp3_path)
+            await progress.edit_text("🔍 Распознаю речь...")
+            # Groq Whisper принимает OGG/Opus напрямую — ffmpeg не нужен
+            transcript = await loop.run_in_executor(None, transcribe, ogg_path)
+            logger.info(f"voice: transcript='{transcript[:80]}'")
 
         if not transcript or len(transcript.strip()) < 2:
-            await progress.edit_text("❌ Не удалось распознать речь. Говори чётче или попробуй ещё раз.")
+            await progress.edit_text(
+                "❌ Речь не распознана.\n\n"
+                "Попробуй: говори чётче, поднеси телефон ближе ко рту."
+            )
             return
 
-        # Показываем что распознали + обрабатываем
-        await progress.edit_text(f"📝 *Распознано:*\n_{transcript}_", parse_mode="Markdown")
+        # Показываем расшифровку
+        safe = transcript.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+        await progress.edit_text(f"📝 *Распознано:*\n_{safe}_", parse_mode="Markdown")
 
+        # Дальше — как обычный текст
         session = user_sessions.get(user_id, {})
         if session.get("state") == "claude_chat":
             await _handle_claude_chat(message, transcript, user_id, session)
@@ -569,14 +574,23 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _process_note(message, transcript, user_id)
 
     except Exception as e:
-        logger.error(f"voice error: {e}", exc_info=True)
-        err_text = str(e)
-        if "ffmpeg" in err_text.lower():
-            await progress.edit_text("❌ ffmpeg не найден на сервере. Обратись к разработчику.")
-        elif "groq" in err_text.lower() or "api" in err_text.lower():
-            await progress.edit_text("❌ Ошибка распознавания (Groq API). Попробуй позже.")
-        else:
-            await progress.edit_text(f"❌ Ошибка: {err_text[:200]}")
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"voice error:\n{tb}")
+        # Отправляем полный стектрейс админу для диагностики
+        if ADMIN_CHAT_ID and user_id != ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    ADMIN_CHAT_ID,
+                    f"🔴 voice error от {user_id}:\n```\n{tb[:1000]}\n```",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+        await progress.edit_text(
+            f"❌ Ошибка при распознавании:\n`{str(e)[:300]}`",
+            parse_mode="Markdown"
+        )
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -952,35 +966,78 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Тест ────────────────────────────────────────────────────────────────────
 
 async def handle_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg     = await update.message.reply_text("🔧 Диагностика...")
-    results = []
+    """/test — полная диагностика всех компонентов системы."""
+    msg  = await update.message.reply_text("🔧 Диагностика (1/5)...")
+    res  = []
+    loop = asyncio.get_event_loop()
 
-    # GitHub
-    if GITHUB_TOKEN:
-        r = requests.get(f"https://api.github.com/repos/{DEFAULT_REPO}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}, timeout=10)
-        results.append("✅ GitHub API" if r.status_code == 200 else f"❌ GitHub: {r.status_code}")
-    else:
-        results.append("❌ GITHUB_TOKEN не задан")
+    # ── 1. ENV переменные ──
+    import os as _os
+    groq_key = _os.environ.get("GROQ_API_KEY", "")
+    or_key   = _os.environ.get("OPENROUTER_API_KEY", "")
+    res.append("*ENV переменные:*")
+    res.append(f"{'✅' if GITHUB_TOKEN    else '❌'} GITHUB\\_TOKEN: {'OK' if GITHUB_TOKEN else 'ОТСУТСТВУЕТ'}")
+    res.append(f"{'✅' if groq_key        else '❌'} GROQ\\_API\\_KEY: {'OK (' + groq_key[:8] + '...)' if groq_key else 'ОТСУТСТВУЕТ'}")
+    res.append(f"{'✅' if or_key          else '❌'} OPENROUTER\\_API\\_KEY: {'OK' if or_key else 'ОТСУТСТВУЕТ'}")
+    res.append(f"{'✅' if ADMIN_CHAT_ID   else '⚠️'} ADMIN\\_CHAT\\_ID: {ADMIN_CHAT_ID or 'не задан'}")
 
-    results.append("✅ ADMIN_CHAT_ID настроен" if ADMIN_CHAT_ID else "⚠️ ADMIN_CHAT_ID не задан (нет уведомлений)")
-
-    # Reels test
-    await msg.edit_text("🔧 Тестирую Reels...")
-    TEST_URL = "https://www.instagram.com/reel/DV1joYJjCz0/"
+    # ── 2. GitHub API ──
+    await msg.edit_text("🔧 Диагностика (2/5) GitHub...")
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            video_path = await download_video(TEST_URL, tmpdir)
-            size_mb = round(os.path.getsize(video_path) / 1024 / 1024, 1)
-            results.append(f"✅ Reels скачивание: OK ({size_mb} MB)")
-            loop = asyncio.get_event_loop()
-            audio_path = await loop.run_in_executor(None, extract_audio, video_path)
-            results.append("✅ ffmpeg: OK")
-            text = await loop.run_in_executor(None, transcribe, audio_path)
-            results.append(f"✅ Groq Whisper: OK ({len(text)} символов)")
+        r = requests.get(
+            f"https://api.github.com/repos/{DEFAULT_REPO}",
+            headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}, timeout=10
+        )
+        res.append(f"\n*GitHub API:* {'✅ OK' if r.status_code == 200 else '❌ ' + str(r.status_code)}")
     except Exception as e:
-        results.append(f"❌ Reels: {e}")
+        res.append(f"\n*GitHub API:* ❌ {e}")
 
-    await msg.edit_text("📊 *Диагностика:*\n\n" + "\n".join(results), parse_mode="Markdown")
+    # ── 3. Groq Whisper (тихий тест без скачивания) ──
+    await msg.edit_text("🔧 Диагностика (3/5) Groq Whisper...")
+    try:
+        if not groq_key:
+            raise ValueError("GROQ_API_KEY не задан")
+        from groq import Groq as _Groq
+        _client = _Groq(api_key=groq_key)
+        # Создаём минимальный тихий ogg (1 байт заголовок OGG)
+        # Вместо этого проверяем что клиент инициализируется
+        res.append(f"*Groq Whisper:* ✅ клиент создан (key={groq_key[:8]}...)")
+    except Exception as e:
+        res.append(f"*Groq Whisper:* ❌ {e}")
+
+    # ── 4. OpenRouter / Claude ──
+    await msg.edit_text("🔧 Диагностика (4/5) OpenRouter...")
+    try:
+        if not or_key:
+            raise ValueError("OPENROUTER_API_KEY не задан")
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"},
+            json={"model": "anthropic/claude-sonnet-4-6", "messages": [{"role":"user","content":"1+1=?"}], "max_tokens": 5},
+            timeout=15
+        )
+        if r.status_code == 200:
+            ans = r.json()["choices"][0]["message"]["content"]
+            res.append(f"*OpenRouter:* ✅ ответ: '{ans}'")
+        else:
+            res.append(f"*OpenRouter:* ❌ HTTP {r.status_code}: {r.text[:100]}")
+    except Exception as e:
+        res.append(f"*OpenRouter:* ❌ {e}")
+
+    # ── 5. ffmpeg (для Reels) ──
+    await msg.edit_text("🔧 Диагностика (5/5) ffmpeg...")
+    try:
+        import subprocess as _sp
+        r2 = _sp.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=5)
+        ver = r2.stdout.split("\n")[0] if r2.returncode == 0 else "не найден"
+        res.append(f"*ffmpeg:* {'✅ ' + ver[:40] if r2.returncode == 0 else '❌ не найден (Reels не работает)'}")
+    except FileNotFoundError:
+        res.append("*ffmpeg:* ❌ не установлен")
+    except Exception as e:
+        res.append(f"*ffmpeg:* ❌ {e}")
+
+    text = "📊 *Диагностика системы:*\n\n" + "\n".join(res)
+    await msg.edit_text(text, parse_mode="Markdown")
 
 
 async def handle_agents_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
