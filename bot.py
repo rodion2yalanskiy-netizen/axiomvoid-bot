@@ -10,8 +10,9 @@ Obsidian структура (СУЩЕСТВУЮЩИЕ папки, без emoji!)
   Личная жизнь:   Цели/ | Дневник/
 """
 
-import os, re, logging, asyncio, base64, tempfile, subprocess
+import os, re, logging, asyncio, base64, tempfile, subprocess, json, time
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -47,13 +48,67 @@ VAULT_REPOS = {
 }
 DEFAULT_REPO = "rodion2yalanskiy-netizen/qsnera-vault"
 
-# ─── Сессии ─────────────────────────────────────────────────────────────────
+# ─── Сессии с TTL и персистентностью ─────────────────────────────────────────
 # state: "reel_confirming" | "reel_editing" | "note_confirming" | "note_editing"
 #        "agent_selecting" | "note_editing_folder" | "claude_chat"
-user_sessions: dict = {}
+SESSION_TTL  = 3600                              # 1 час — сессия живёт без активности
+SESSION_FILE = Path("/tmp/bot_sessions.json")    # переживает crash/graceful restart
+
+def _persist(data: dict):
+    try:
+        SESSION_FILE.write_text(json.dumps(
+            {str(k): v for k, v in data.items()}, ensure_ascii=False
+        ))
+    except Exception:
+        pass
+
+def _load_sessions() -> dict:
+    try:
+        if SESSION_FILE.exists():
+            raw = json.loads(SESSION_FILE.read_text())
+            now = time.time()
+            return {int(k): v for k, v in raw.items()
+                    if now - v.get("_ts", 0) < SESSION_TTL}
+    except Exception:
+        pass
+    return {}
+
+class SessionStore(dict):
+    """dict с автоматическим TTL и персистентностью."""
+
+    def __setitem__(self, key, value):
+        if isinstance(value, dict):
+            value["_ts"] = time.time()
+        super().__setitem__(key, value)
+        _persist(self)
+
+    def get(self, key, default=None):          # type: ignore[override]
+        s = super().get(key)
+        if s is None:
+            return default
+        if time.time() - s.get("_ts", 0) > SESSION_TTL:
+            super().__delitem__(key)
+            _persist(self)
+            return default
+        return s
+
+    def pop(self, key, *args):
+        result = super().pop(key, *args)
+        _persist(self)
+        return result
+
+    def touch(self, key):
+        """Обновляет _ts и сохраняет (вызывать после прямого изменения dict внутри)."""
+        if key in self:
+            self[key]["_ts"] = time.time()
+            _persist(self)
+
+# Загружаем при старте — сессии переживают crash/graceful restart
+user_sessions: SessionStore = SessionStore(_load_sessions())
 
 # Кеш списка отчётов для inline-кнопок (user_id -> list of file dicts)
 report_cache: dict = {}
+REPORT_CACHE_TTL = 300  # 5 минут
 
 # ─── Системный промпт для чата ────────────────────────────────────────────────
 SYSTEM_PROMPT_CHAT = (
@@ -114,8 +169,10 @@ def reel_keyboard(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✏️ Доработать",             callback_data=f"reel_edit:{user_id}"),
     ]])
 
-def agent_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def agent_keyboard(user_id: int, urgent: bool = False) -> InlineKeyboardMarkup:
     """Клавиатура выбора агента для выполнения задачи."""
+    prio_btn = "🔴 Срочно (сейчас)" if not urgent else "⚪ Обычный приоритет"
+    prio_data = f"agt:{user_id}:set_urgent" if not urgent else f"agt:{user_id}:set_normal"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(AGENTS["code"]["btn"],        callback_data=f"agt:{user_id}:code"),
@@ -128,6 +185,9 @@ def agent_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(AGENTS["antigravity"]["btn"], callback_data=f"agt:{user_id}:antigravity"),
             InlineKeyboardButton("✏️ Изменить задачу",         callback_data=f"agt:{user_id}:edit"),
+        ],
+        [
+            InlineKeyboardButton(prio_btn,                     callback_data=prio_data),
         ],
     ])
 
@@ -252,16 +312,20 @@ def send_task_to_claude_code(title: str, task_text: str, tool: str = "code") -> 
     return ok
 
 
-def create_task(title: str, task_text: str, tool: str = "code") -> tuple:
-    """Создаёт задачу в Задачи/ с указанным tool. Возвращает (success: bool, github_path: str)."""
+def create_task(title: str, task_text: str, tool: str = "code", priority: str = "normal") -> tuple:
+    """Создаёт задачу в Задачи/ с указанным tool и приоритетом. Возвращает (success: bool, github_path: str)."""
     safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', title, flags=re.UNICODE)[:50].strip()
     filename  = f"{safe_name} ({datetime.now().strftime('%H%M')}).md"
+    # Urgent задачи получают префикс для сортировки первыми (sort по имени файла)
+    if priority == "urgent":
+        filename = f"0_URGENT_{filename}"
     path      = f"Задачи/{filename}"
 
     content = f"""---
 type: task
 tool: {tool}
 status: delegated
+priority: {priority}
 task_name: {safe_name}
 date: {datetime.now().strftime('%Y-%m-%d')}
 source: telegram-bot
@@ -331,7 +395,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• _«Задача: напиши коммерческое предложение»_ → выбор агента → отчёт сюда\n"
         "• [фото плитки] → анализ материала + сохранение\n"
         "• instagram.com/reel/... → анализ + промпт для агента\n\n"
-        "Команды: /задача /чат /агенты /отчёты /help /myid",
+        "Команды: /задача /чат /агенты /отчёты /статус /help /myid",
         parse_mode="Markdown"
     )
 
@@ -352,8 +416,9 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏢 Бизнес QSNera — клиенты, задачи, маркетинг, сайт\n"
         "🧠 Цифровой мозг — Brain, Система, Саморазвитие\n"
         "🏠 Личная жизнь — Цели, Дневник\n\n"
+        "/статус — статус агентов, очередь задач, последние отчёты\n"
         "/myid — твой Telegram ID\n"
-        "/test — диагностика системы",
+        "/test — полная диагностика системы",
         parse_mode="Markdown"
     )
 
@@ -413,7 +478,7 @@ async def _process_note(message, text: str, user_id: int):
 
     progress = await message.reply_text("🤔 Разбираюсь куда сохранить...")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         classification = await loop.run_in_executor(None, classify_note, text)
 
         vault    = classification.get("vault", "Бизнес QSNera")
@@ -503,7 +568,7 @@ async def _handle_note_text_edit(message, text: str, user_id: int, session: dict
 async def _process_reel(message, url: str, user_id: int):
     progress = await message.reply_text("⬇️ Скачиваю Reel...")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with tempfile.TemporaryDirectory() as tmpdir:
             video_path    = await download_video(url, tmpdir)
             await progress.edit_text("🎤 Транскрибирую аудио...")
@@ -539,7 +604,7 @@ async def _process_reel(message, url: str, user_id: int):
 async def _handle_reel_refinement(message, text: str, user_id: int, session: dict):
     progress = await message.reply_text("⏳ Вношу правки...")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         new_notes, new_prompt = await loop.run_in_executor(
             None, refine_content, session["notes"], session["research"], session["prompt"], text
         )
@@ -630,7 +695,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         question = caption if caption else "Что на этом фото? Опиши профессионально — особенно если это плитка, мрамор, камень или интерьерный дизайн."
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # В режиме чата — добавляем в историю
         if session.get("state") == "claude_chat":
@@ -675,7 +740,7 @@ async def _handle_claude_chat(message, text: str, user_id: int, session: dict):
         # Сохраняем конспект
         if history:
             await message.reply_text("📝 Сохраняю конспект диалога...")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
             summary = await loop.run_in_executor(None, generate_chat_summary, history, date_str)
             title   = f"Диалог {datetime.now().strftime('%d.%m %H:%M')}"
@@ -700,7 +765,7 @@ async def _handle_claude_chat(message, text: str, user_id: int, session: dict):
     progress = await message.reply_text("💭 Думаю...")
     try:
         history.append({"role": "user", "content": text})
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         answer = await loop.run_in_executor(
             None, chat_with_claude, history, SYSTEM_PROMPT_CHAT, 2000
         )
@@ -709,6 +774,7 @@ async def _handle_claude_chat(message, text: str, user_id: int, session: dict):
         if len(history) > 20:
             history = history[-20:]
         user_sessions[user_id]["history"] = history
+        user_sessions.touch(user_id)
 
         msg_count = len([m for m in history if m["role"] == "user"])
         await progress.edit_text(
@@ -752,7 +818,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id  = update.effective_user.id
     progress = await message.reply_text("⏳ Получаю видео...")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with tempfile.TemporaryDirectory() as tmpdir:
             video_path = f"{tmpdir}/reel.mp4"
             file = await context.bot.get_file(video.file_id)
@@ -808,24 +874,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Пользователь нажал «Изменить задачу»
         if tool == "edit":
             user_sessions[uid]["state"] = "note_editing"
+            user_sessions.touch(uid)
             await query.edit_message_reply_markup(None)
             await query.message.reply_text("✏️ Напиши исправленный текст задачи:")
+            return
+
+        # Пользователь переключил приоритет
+        if tool in ("set_urgent", "set_normal"):
+            new_prio = "urgent" if tool == "set_urgent" else "normal"
+            user_sessions[uid]["priority"] = new_prio
+            user_sessions.touch(uid)
+            is_urgent = (new_prio == "urgent")
+            prio_text = "🔴 *Срочно* — выполнится первым" if is_urgent else "⚪ Обычный приоритет"
+            title_show = session.get("title", "Задача")
+            await query.edit_message_text(
+                f"⚡ *Задача готова*\n\n📄 *{title_show}*\n\n{prio_text}\n\n*Выбери агента-исполнителя:*",
+                parse_mode="Markdown",
+                reply_markup=agent_keyboard(uid, urgent=is_urgent)
+            )
             return
 
         agent_info = AGENTS.get(tool, AGENTS["code"])
         title      = session.get("title", "Задача")
         task_text  = session.get("text",  "")
+        priority   = session.get("priority", "normal")
 
         # Убираем кнопки, показываем прогресс
+        prio_suffix = " 🔴" if priority == "urgent" else ""
         await query.edit_message_reply_markup(None)
         msg = await query.message.reply_text(
-            f"{agent_info['icon']} Отправляю задачу в *{agent_info['title']}*...",
+            f"{agent_info['icon']} Отправляю задачу в *{agent_info['title']}*{prio_suffix}...",
             parse_mode="Markdown"
         )
 
         # Создаём задачу
-        loop = asyncio.get_event_loop()
-        ok, gh_path = await loop.run_in_executor(None, create_task, title, task_text, tool)
+        loop = asyncio.get_running_loop()
+        ok, gh_path = await loop.run_in_executor(None, create_task, title, task_text, tool, priority)
 
         if not ok:
             await msg.edit_text("❌ Ошибка создания задачи. Проверь GitHub Token.")
@@ -847,10 +931,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             verify_text = "\n".join(verify_lines)
 
+            prio_line = "🔴 *Приоритет: СРОЧНО* — выполнится первым\n" if priority == "urgent" else ""
             await msg.edit_text(
                 f"✅ *Задача отправлена!*\n\n"
                 f"📌 *{title}*\n"
                 f"{agent_info['icon']} Агент: *{agent_info['title']}*\n"
+                f"{prio_line}"
                 f"⏱ Ожидаемое время: {agent_info['time']}\n"
                 f"📱 Отчёт придёт сюда автоматически\n"
                 f"{verify_text}",
@@ -879,7 +965,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         report = reports[idx]
         await query.message.reply_text("📖 Загружаю отчёт...")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw = await loop.run_in_executor(None, github_get_file_content, report["path"])
         if not raw:
             await query.message.reply_text("❌ Не удалось загрузить отчёт.")
@@ -944,7 +1030,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text   = session["text"]
         note_type = session.get("type", "note")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if note_type == "task":
             success = await loop.run_in_executor(None, send_task_to_claude_code, title, text)
             if success:
@@ -989,7 +1075,7 @@ async def handle_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/test — полная диагностика всех компонентов системы."""
     msg  = await update.message.reply_text("🔧 Диагностика (1/5)...")
     res  = []
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # ── 1. ENV переменные ──
     import os as _os
@@ -1083,7 +1169,7 @@ async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     msg = await update.message.reply_text("📋 Загружаю отчёты из Obsidian...")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     reports = await loop.run_in_executor(None, github_get_reports)
 
     if not reports:
@@ -1142,6 +1228,81 @@ async def handle_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode="Markdown",
         reply_markup=agent_keyboard(user_id)
     )
+
+
+async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/статус — проверяет состояние всех локальных агентов через GitHub API."""
+    msg = await update.message.reply_text("🔍 Проверяю статус агентов...")
+    res = []
+
+    # ── Читаем session-state.md из GitHub ──
+    raw = github_get_file_content("Brain/session-state.md")
+    if not raw:
+        raw = github_get_file_content("Система/session-state.md")
+
+    # ── Читаем лог local-agent из GitHub (последние строки в отчёте) ──
+    # Вместо этого смотрим время последнего коммита local-agent через GitHub API
+    try:
+        headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+        # Последний коммит к Отчёты/ — показывает активность агента
+        r = requests.get(
+            f"https://api.github.com/repos/{DEFAULT_REPO}/commits",
+            params={"path": "Отчёты", "per_page": 1},
+            headers=headers, timeout=10
+        )
+        if r.status_code == 200 and r.json():
+            last = r.json()[0]
+            commit_dt = last["commit"]["committer"]["date"]   # ISO 8601 UTC
+            author_msg = last["commit"]["message"][:60]
+            # Парсим время
+            from datetime import timezone
+            dt = datetime.fromisoformat(commit_dt.replace("Z", "+00:00"))
+            now_utc = datetime.now(timezone.utc)
+            diff_min = int((now_utc - dt).total_seconds() / 60)
+            icon = "✅" if diff_min < 30 else ("⚠️" if diff_min < 120 else "❌")
+            res.append(f"{icon} *local-agent:* последний отчёт {diff_min} мин назад")
+            res.append(f"   _{author_msg}_")
+        else:
+            res.append("❓ *local-agent:* нет данных о последнем коммите")
+    except Exception as e:
+        res.append(f"❌ *local-agent:* ошибка проверки ({e})")
+
+    # ── Количество задач в очереди ──
+    try:
+        r2 = requests.get(
+            f"https://api.github.com/repos/{DEFAULT_REPO}/contents/%D0%97%D0%B0%D0%B4%D0%B0%D1%87%D0%B8",
+            headers=headers, timeout=10
+        )
+        if r2.status_code == 200:
+            files = [f for f in r2.json() if isinstance(f, dict) and f.get("name", "").endswith(".md")]
+            res.append(f"\n📋 *Очередь задач:* {len(files)} файл(ов)")
+        else:
+            res.append(f"\n📋 *Очередь задач:* нет доступа (HTTP {r2.status_code})")
+    except Exception as e:
+        res.append(f"\n📋 *Очередь задач:* ошибка ({e})")
+
+    # ── Последние отчёты ──
+    try:
+        r3 = requests.get(
+            f"https://api.github.com/repos/{DEFAULT_REPO}/commits",
+            params={"path": "Отчёты", "per_page": 3},
+            headers=headers, timeout=10
+        )
+        if r3.status_code == 200 and r3.json():
+            res.append("\n📄 *Последние выполненные задачи:*")
+            for c in r3.json():
+                msg_txt = c["commit"]["message"].replace("Local agent: ", "").replace(" task(s) completed [skip ci]", "")[:50]
+                res.append(f"  • _{msg_txt}_")
+    except Exception:
+        pass
+
+    # ── Статус бота ──
+    res.append(f"\n🤖 *Бот:* ✅ работает")
+    res.append(f"💬 *Активных сессий:* {len(user_sessions)}")
+    res.append(f"🕐 *Время сервера:* {datetime.now().strftime('%H:%M %d.%m.%Y')}")
+
+    text = "📊 *Статус системы QSNera*\n\n" + "\n".join(res)
+    await msg.edit_text(text, parse_mode="Markdown")
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -1211,6 +1372,8 @@ def main():
     app.add_handler(CommandHandler("agents",  handle_agents_info))
     app.add_handler(CommandHandler("чат",     handle_chat_command))
     app.add_handler(CommandHandler("chat",    handle_chat_command))
+    app.add_handler(CommandHandler("статус",  handle_status))
+    app.add_handler(CommandHandler("status",  handle_status))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
