@@ -32,6 +32,10 @@ from downloader import download_video
 
 logging.basicConfig(format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Убираем httpx/httpcore шум — они генерируют 80% Railway logs без пользы
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
