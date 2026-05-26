@@ -45,10 +45,11 @@ RAILWAY_SVC_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
 RAILWAY_ENV_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
 
 # Репозитории для каждого vault'а
+# ВАЖНО: каждый vault → свой repo, иначе бот создаёт папки в чужом vault'е!
 VAULT_REPOS = {
     "Бизнес QSNera": "rodion2yalanskiy-netizen/qsnera-vault",
-    "Цифровой мозг": "rodion2yalanskiy-netizen/qsnera-vault",  # пока один repo
-    "Личная жизнь":  "rodion2yalanskiy-netizen/qsnera-vault",
+    "Цифровой мозг": "rodion2yalanskiy-netizen/digital-brain-vault",
+    "Личная жизнь":  "rodion2yalanskiy-netizen/digital-brain-vault",  # нет отдельного repo, Brain как хаб
 }
 DEFAULT_REPO = "rodion2yalanskiy-netizen/qsnera-vault"
 
@@ -234,25 +235,41 @@ def github_create_file(repo: str, path: str, content: str, message: str) -> bool
 
 def save_note_to_obsidian(vault: str, folder: str, title: str, content: str) -> bool:
     """Сохраняет заметку в нужный vault через GitHub API.
-    Использует ТОЛЬКО существующие папки из ALLOWED_FOLDERS."""
+    Использует ТОЛЬКО существующие папки — проверяет реальную структуру репозиториев."""
     import re as _re
 
-    # Разрешённые папки — только реально существующие в vault'ах
+    # Разрешённые папки — только реально существующие в каждом репозитории!
+    # qsnera-vault (Бизнес QSNera): Клиенты, Задачи, Отчёты, Маркетинг, Сайт
+    # digital-brain-vault (Цифровой мозг + Личная жизнь): Brain, Система, Саморазвитие, Работа над собой
     ALLOWED_FOLDERS = {
         "Бизнес QSNera": ["Клиенты", "Задачи", "Отчёты", "Маркетинг", "Сайт"],
         "Цифровой мозг": ["Brain", "Система", "Саморазвитие", "Работа над собой"],
-        "Личная жизнь":  ["Цели", "Дневник"],
+        "Личная жизнь":  ["Brain", "Саморазвитие", "Работа над собой"],  # в digital-brain-vault, нет отдельного repo
+    }
+
+    # Дефолтная папка для каждого vault'а
+    VAULT_DEFAULTS = {
+        "Бизнес QSNera": "Задачи",
+        "Цифровой мозг": "Brain",
+        "Личная жизнь":  "Brain",
     }
 
     # Очищаем emoji из vault и folder
     vault  = _re.sub(r'[\U0001F000-\U0001FFFF☀-⟿⌀-⏿]', '', vault).strip()
     folder = _re.sub(r'[\U0001F000-\U0001FFFF☀-⟿⌀-⏿]', '', folder).strip()
 
-    # Валидируем — если папки нет, используем дефолт
+    # Валидируем — если vault неизвестен, сбрасываем на Бизнес QSNera
     if vault not in ALLOWED_FOLDERS:
         vault = "Бизнес QSNera"
+
+    # Маппинг папок Личная жизнь → существующие папки в digital-brain-vault
+    if vault == "Личная жизнь":
+        folder_map = {"Цели": "Саморазвитие", "Дневник": "Работа над собой"}
+        folder = folder_map.get(folder, "Brain")
+
+    # Валидируем folder — если нет в списке, берём дефолт для vault'а
     if folder not in ALLOWED_FOLDERS.get(vault, []):
-        folder = "Задачи"
+        folder = VAULT_DEFAULTS.get(vault, "Brain")
 
     repo      = VAULT_REPOS.get(vault, DEFAULT_REPO)
     safe_title = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', title, flags=re.UNICODE)[:60].strip()
