@@ -52,10 +52,11 @@ def extract_audio(video_path: str) -> str:
 
 
 def transcribe(audio_path: str) -> str:
-    """Транскрипция через Groq Whisper"""
+    """Транскрипция через Groq Whisper. Принимает mp3/ogg/wav/m4a."""
+    filename = os.path.basename(audio_path)  # сохраняем реальное расширение
     with open(audio_path, "rb") as f:
         result = groq_client.audio.transcriptions.create(
-            file=("audio.mp3", f),
+            file=(filename, f),
             model="whisper-large-v3",
             response_format="text"
         )

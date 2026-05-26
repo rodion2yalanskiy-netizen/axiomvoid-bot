@@ -533,41 +533,50 @@ async def _handle_reel_refinement(message, text: str, user_id: int, session: dic
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Голосовое сообщение → Groq Whisper → обработка как текст."""
+    """Голосовое сообщение → ffmpeg конвертация → Groq Whisper → обработка как текст."""
     message = update.message
     user_id = update.effective_user.id
     voice   = message.voice or message.audio
 
     progress = await message.reply_text("🎤 Слушаю...")
     try:
-        # Скачиваем голосовое
         file = await context.bot.get_file(voice.file_id)
+        loop = asyncio.get_event_loop()
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = f"{tmpdir}/voice.ogg"
-            await file.download_to_drive(audio_path)
+            # Скачиваем как .ogg (Telegram Voice → Opus codec)
+            ogg_path = f"{tmpdir}/voice.ogg"
+            await file.download_to_drive(ogg_path)
+
+            await progress.edit_text("🔄 Конвертирую...")
+            # ogg (Opus) → mp3 через ffmpeg — Groq лучше понимает mp3
+            mp3_path = await loop.run_in_executor(None, extract_audio, ogg_path)
+
             await progress.edit_text("🔍 Транскрибирую...")
-            loop = asyncio.get_event_loop()
-            transcript = await loop.run_in_executor(None, transcribe, audio_path)
+            transcript = await loop.run_in_executor(None, transcribe, mp3_path)
 
         if not transcript or len(transcript.strip()) < 2:
-            await progress.edit_text("❌ Не удалось распознать речь. Попробуй ещё раз.")
+            await progress.edit_text("❌ Не удалось распознать речь. Говори чётче или попробуй ещё раз.")
             return
 
-        await progress.edit_text(f"📝 Распознано:\n_{transcript}_", parse_mode="Markdown")
+        # Показываем что распознали + обрабатываем
+        await progress.edit_text(f"📝 *Распознано:*\n_{transcript}_", parse_mode="Markdown")
 
-        # Обрабатываем текст как обычное сообщение
         session = user_sessions.get(user_id, {})
-
         if session.get("state") == "claude_chat":
-            # В режиме чата — отправляем в Claude
             await _handle_claude_chat(message, transcript, user_id, session)
         else:
-            # Иначе — классифицируем как заметку/задачу
             await _process_note(message, transcript, user_id)
 
     except Exception as e:
         logger.error(f"voice error: {e}", exc_info=True)
-        await progress.edit_text(f"❌ Ошибка обработки голоса: {e}")
+        err_text = str(e)
+        if "ffmpeg" in err_text.lower():
+            await progress.edit_text("❌ ffmpeg не найден на сервере. Обратись к разработчику.")
+        elif "groq" in err_text.lower() or "api" in err_text.lower():
+            await progress.edit_text("❌ Ошибка распознавания (Groq API). Попробуй позже.")
+        else:
+            await progress.edit_text(f"❌ Ошибка: {err_text[:200]}")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
