@@ -52,13 +52,33 @@ def extract_audio(video_path: str) -> str:
 
 
 def transcribe(audio_path: str) -> str:
-    """Транскрипция через Groq Whisper. Принимает mp3/ogg/wav/m4a."""
-    filename = os.path.basename(audio_path)  # сохраняем реальное расширение
+    """Транскрипция через Groq Whisper. Принимает mp3/ogg/wav/m4a.
+
+    Telegram голосовые приходят как OGG/Opus. Groq требует правильный mime-type.
+    Явно указываем audio/ogg для .ogg файлов чтобы Whisper не отвергал их.
+    """
+    ext      = os.path.splitext(audio_path)[1].lower()
+    filename = os.path.basename(audio_path)
+
+    # Явный mime-type для Groq Whisper — без него OGG/Opus иногда отвергается
+    MIME_TYPES = {
+        ".ogg":  "audio/ogg",
+        ".opus": "audio/ogg",
+        ".mp3":  "audio/mpeg",
+        ".mp4":  "audio/mp4",
+        ".m4a":  "audio/mp4",
+        ".wav":  "audio/wav",
+        ".webm": "audio/webm",
+        ".flac": "audio/flac",
+    }
+    mime = MIME_TYPES.get(ext, "audio/ogg")
+
     with open(audio_path, "rb") as f:
         result = groq_client.audio.transcriptions.create(
-            file=(filename, f),
+            file=(filename, f, mime),
             model="whisper-large-v3",
-            response_format="text"
+            response_format="text",
+            language="ru",   # подсказка — основной язык русский (повышает точность)
         )
     return result.strip() if result else ""
 
