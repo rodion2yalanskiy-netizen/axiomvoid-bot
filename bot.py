@@ -170,7 +170,7 @@ def github_create_file(repo: str, path: str, content: str, message: str) -> bool
 
 def save_note_to_obsidian(vault: str, folder: str, title: str, content: str) -> bool:
     """Сохраняет заметку в нужный vault через GitHub API."""
-    repo      = DEFAULT_REPO
+    repo      = VAULT_REPOS.get(vault, DEFAULT_REPO)
     safe_title = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', title, flags=re.UNICODE)[:60].strip()
     date_str   = datetime.now().strftime("%Y-%m-%d")
     filename   = f"{safe_title}.md"
@@ -298,25 +298,32 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *QSNera AI Bot*\n\n"
         "Я умею:\n\n"
-        "📝 *Создавать заметки* — просто напиши что угодно текстом, я пойму куда сохранить\n"
-        "🎬 *Анализировать Reels* — пришли ссылку на Instagram или само видео\n"
+        "📝 *Создавать заметки* — просто напиши что угодно текстом\n"
+        "📷 *Анализировать фото* — пришли фото плитки или дизайна\n"
+        "🎬 *Анализировать Reels* — пришли ссылку на Instagram\n"
         "⚡ *Задача агенту* — /задача + выбор агента\n"
+        "💬 *Диалог с Claude* — /чат для многоходового разговора\n"
         "🤖 *Все агенты* — /агенты\n"
         "📋 *Читать отчёты* — /отчёты\n\n"
         "Примеры:\n"
         "• _«Встреча с клиентом Петровым, хочет мрамор»_ → заметка в Клиенты/\n"
         "• _«Задача: напиши коммерческое предложение»_ → выбор агента → отчёт сюда\n"
+        "• [фото плитки] → анализ материала + сохранение\n"
         "• instagram.com/reel/... → анализ + промпт для агента\n\n"
-        "Команды: /задача /агенты /отчёты /help /myid",
+        "Команды: /задача /чат /агенты /отчёты /help /myid",
         parse_mode="Markdown"
     )
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Как пользоваться:*\n\n"
-        "*Заметки:* просто напиши текст → бот предложит куда сохранить\n"
-        "*Задача агенту:* `/задача что сделать` → выбери агента → отчёт придёт сюда\n"
+        "*Заметки:* напиши текст → бот предложит куда сохранить\n"
+        "*Фото:* пришли фото плитки/интерьера → анализ Claude Vision\n"
+        "*Задача агенту:* `/задача что сделать` → выбери агента\n"
         "  или напиши текст с _«задача:»_ / _«сделай:»_\n"
+        "*Диалог:* `/чат` — Claude помнит весь разговор\n"
+        "  пришли фото прямо в чат — анализирует в контексте\n"
+        "  /стоп — завершить и сохранить конспект в Obsidian\n"
         "*Все агенты:* `/агенты` — описание + кнопки\n"
         "*Отчёты:* `/отчёты` — последние отчёты прямо здесь\n"
         "*Reels:* пришли ссылку instagram.com/reel/...\n\n"
@@ -348,6 +355,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text    = (message.text or "").strip()
     user_id = update.effective_user.id
     session = user_sessions.get(user_id, {})
+
+    # ── Режим чата с Claude ──
+    if session.get("state") == "claude_chat":
+        await _handle_claude_chat(message, text, user_id, session)
+        return
 
     # ── Режим правки Reels ──
     if session.get("state") == "reel_editing":
@@ -519,6 +531,136 @@ async def _handle_reel_refinement(message, text: str, user_id: int, session: dic
         await progress.edit_text(f"❌ Ошибка: {e}")
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Фото напрямую → анализ через Claude Vision."""
+    message = update.message
+    user_id = update.effective_user.id
+    session = user_sessions.get(user_id, {})
+    caption = (message.caption or "").strip()
+
+    progress = await message.reply_text("🔍 Анализирую фото...")
+    try:
+        # Скачиваем фото (берём наибольшее)
+        photo   = message.photo[-1]
+        file    = await context.bot.get_file(photo.file_id)
+        f_bytes = await file.download_as_bytearray()
+        img_b64 = base64.b64encode(bytes(f_bytes)).decode()
+
+        question = caption if caption else "Что на этом фото? Опиши профессионально — особенно если это плитка, мрамор, камень или интерьерный дизайн."
+
+        loop = asyncio.get_event_loop()
+
+        # В режиме чата — добавляем в историю
+        if session.get("state") == "claude_chat":
+            history = session.get("history", [])
+            answer, user_msg = await loop.run_in_executor(
+                None, analyze_image_in_chat, img_b64, question, history
+            )
+            history.append(user_msg)
+            history.append({"role": "assistant", "content": answer})
+            user_sessions[user_id]["history"] = history
+            await progress.edit_text(answer[:4000])
+        else:
+            # Вне чата — разовый анализ
+            answer, _ = await loop.run_in_executor(
+                None, analyze_image_in_chat, img_b64, question, []
+            )
+            # Предлагаем сохранить как заметку или задачу
+            user_sessions[user_id] = {
+                "state":  "note_confirming",
+                "text":   f"[Анализ фото]\n{answer}",
+                "vault":  "Бизнес QSNera",
+                "folder": "Клиенты",
+                "title":  f"Фото анализ {datetime.now().strftime('%d.%m %H:%M')}",
+                "type":   "note",
+            }
+            await progress.edit_text(
+                f"📷 *Анализ фото:*\n\n{answer[:3500]}",
+                parse_mode="Markdown",
+                reply_markup=note_keyboard(user_id)
+            )
+    except Exception as e:
+        logger.error(f"photo error: {e}", exc_info=True)
+        await progress.edit_text(f"❌ Ошибка анализа фото: {e}")
+
+
+async def _handle_claude_chat(message, text: str, user_id: int, session: dict):
+    """Многоходовой диалог с Claude."""
+    history = session.get("history", [])
+
+    # Добавляем команду выхода
+    if text.lower() in ("/стоп", "/stop", "/выход", "стоп", "выход"):
+        # Сохраняем конспект
+        if history:
+            await message.reply_text("📝 Сохраняю конспект диалога...")
+            loop = asyncio.get_event_loop()
+            date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            summary = await loop.run_in_executor(None, generate_chat_summary, history, date_str)
+            title   = f"Диалог {datetime.now().strftime('%d.%m %H:%M')}"
+            user_sessions[user_id] = {
+                "state":  "note_confirming",
+                "text":   summary,
+                "vault":  "Цифровой мозг",
+                "folder": "Brain",
+                "title":  title,
+                "type":   "note",
+            }
+            await message.reply_text(
+                f"💾 *Сохранить конспект диалога?*\n📁 Цифровой мозг / Brain / `{title}.md`",
+                parse_mode="Markdown",
+                reply_markup=note_keyboard(user_id)
+            )
+        else:
+            user_sessions.pop(user_id, None)
+            await message.reply_text("👋 Диалог завершён.")
+        return
+
+    progress = await message.reply_text("💭 Думаю...")
+    try:
+        history.append({"role": "user", "content": text})
+        loop = asyncio.get_event_loop()
+        answer = await loop.run_in_executor(
+            None, chat_with_claude, history, SYSTEM_PROMPT_CHAT, 2000
+        )
+        history.append({"role": "assistant", "content": answer})
+        # Ограничиваем историю (последние 20 сообщений)
+        if len(history) > 20:
+            history = history[-20:]
+        user_sessions[user_id]["history"] = history
+
+        msg_count = len([m for m in history if m["role"] == "user"])
+        await progress.edit_text(
+            f"{answer[:3900]}\n\n_Сообщение {msg_count} · /стоп чтобы завершить_",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"chat error: {e}")
+        await progress.edit_text(f"❌ Ошибка: {e}")
+
+
+async def handle_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/чат — начать диалог с Claude."""
+    user_id = update.effective_user.id
+    text    = " ".join(context.args).strip() if context.args else ""
+
+    user_sessions[user_id] = {
+        "state":   "claude_chat",
+        "history": [],
+    }
+
+    if text:
+        # Если сразу дал вопрос — обрабатываем
+        await handle_text(update, context)
+    else:
+        await update.message.reply_text(
+            "🤖 *Диалог с Claude*\n\n"
+            "Задавай вопросы — я помню контекст всего разговора.\n"
+            "Можешь присылать фото плитки для анализа.\n\n"
+            "_/стоп_ — завершить и сохранить конспект в Obsidian",
+            parse_mode="Markdown"
+        )
+
+
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Видео напрямую → анализ как Reel."""
     message = update.message
@@ -666,7 +808,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fm_parts = raw.split("---", 2)
             if len(fm_parts) >= 3:
                 body = fm_parts[2].strip()
-        name = report["name"].replace("Отчёт: ", "").replace(".md", "")
+        name = report["name"].replace("Отчёт - ", "").replace("Отчёт: ", "").replace(".md", "")
         out = f"📋 *{name}*\n\n{body}"
         if len(out) > 4000:
             out = out[:3950] + "\n\n_...обрезано — смотри полный отчёт в Obsidian_"
@@ -942,6 +1084,9 @@ def main():
     app.add_handler(CommandHandler("task",    handle_task_command))
     app.add_handler(CommandHandler("агенты",  handle_agents_info))
     app.add_handler(CommandHandler("agents",  handle_agents_info))
+    app.add_handler(CommandHandler("чат",     handle_chat_command))
+    app.add_handler(CommandHandler("chat",    handle_chat_command))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
