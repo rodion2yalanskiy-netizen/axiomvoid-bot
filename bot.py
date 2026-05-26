@@ -4,10 +4,10 @@ QSNera AI Bot — два режима в одном:
   1. 📝 ЗАМЕТКИ: любой текст → Claude классифицирует → предлагает vault/папку → сохраняет в Obsidian
   2. 🎬 REELS:  Instagram ссылка/видео → транскрипция → анализ → промпт → Claude Code
 
-Obsidian структура:
+Obsidian структура (СУЩЕСТВУЮЩИЕ папки, без emoji!):
   Бизнес QSNera:  Клиенты/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/
-  Цифровой мозг:  Brain/ | API Ключи.md
-  Личная жизнь:   Цели.md | Дневник/ | Автономный доход/
+  Цифровой мозг:  Brain/ | Система/ | Саморазвитие/ | Работа над собой/
+  Личная жизнь:   Цели/ | Дневник/
 """
 
 import os, re, logging, asyncio, base64, tempfile, subprocess
@@ -169,7 +169,27 @@ def github_create_file(repo: str, path: str, content: str, message: str) -> bool
 
 
 def save_note_to_obsidian(vault: str, folder: str, title: str, content: str) -> bool:
-    """Сохраняет заметку в нужный vault через GitHub API."""
+    """Сохраняет заметку в нужный vault через GitHub API.
+    Использует ТОЛЬКО существующие папки из ALLOWED_FOLDERS."""
+    import re as _re
+
+    # Разрешённые папки — только реально существующие в vault'ах
+    ALLOWED_FOLDERS = {
+        "Бизнес QSNera": ["Клиенты", "Задачи", "Отчёты", "Маркетинг", "Сайт"],
+        "Цифровой мозг": ["Brain", "Система", "Саморазвитие", "Работа над собой"],
+        "Личная жизнь":  ["Цели", "Дневник"],
+    }
+
+    # Очищаем emoji из vault и folder
+    vault  = _re.sub(r'[\U0001F000-\U0001FFFF☀-⟿⌀-⏿]', '', vault).strip()
+    folder = _re.sub(r'[\U0001F000-\U0001FFFF☀-⟿⌀-⏿]', '', folder).strip()
+
+    # Валидируем — если папки нет, используем дефолт
+    if vault not in ALLOWED_FOLDERS:
+        vault = "Бизнес QSNera"
+    if folder not in ALLOWED_FOLDERS.get(vault, []):
+        folder = "Задачи"
+
     repo      = VAULT_REPOS.get(vault, DEFAULT_REPO)
     safe_title = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', title, flags=re.UNICODE)[:60].strip()
     date_str   = datetime.now().strftime("%Y-%m-%d")
@@ -329,9 +349,9 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Отчёты:* `/отчёты` — последние отчёты прямо здесь\n"
         "*Reels:* пришли ссылку instagram.com/reel/...\n\n"
         "*Хранилища:*\n"
-        "🏢 Бизнес QSNera — клиенты, задачи, сайт, маркетинг\n"
-        "🧠 Цифровой мозг — техника, знания\n"
-        "🏠 Личная жизнь — цели, дневник\n\n"
+        "🏢 Бизнес QSNera — клиенты, задачи, маркетинг, сайт\n"
+        "🧠 Цифровой мозг — Brain, Система, Саморазвитие\n"
+        "🏠 Личная жизнь — Цели, Дневник\n\n"
         "/myid — твой Telegram ID\n"
         "/test — диагностика системы",
         parse_mode="Markdown"
