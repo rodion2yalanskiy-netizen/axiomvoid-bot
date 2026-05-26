@@ -394,7 +394,13 @@ def classify_note(text: str) -> dict:
 
 Если текст — это задача (что-то нужно сделать, код, автоматизация), верни type: "task"."""
 
-    response = _call_openrouter([{"role": "user", "content": prompt}], max_tokens=200)
+    # Haiku: классификация — простая задача, JSON из 4 полей.
+    # ~15x дешевле sonnet, качества достаточно для routing.
+    response = _call_openrouter(
+        [{"role": "user", "content": prompt}],
+        model="anthropic/claude-haiku-4-5",
+        max_tokens=200,
+    )
 
     text_r = response.strip()
     if text_r.startswith("```"):
