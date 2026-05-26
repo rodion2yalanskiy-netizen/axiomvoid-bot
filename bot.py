@@ -299,6 +299,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *QSNera AI Bot*\n\n"
         "Я умею:\n\n"
         "📝 *Создавать заметки* — просто напиши что угодно текстом\n"
+        "🎤 *Голосовые* — говори голосом, пойму и классифицирую\n"
         "📷 *Анализировать фото* — пришли фото плитки или дизайна\n"
         "🎬 *Анализировать Reels* — пришли ссылку на Instagram\n"
         "⚡ *Задача агенту* — /задача + выбор агента\n"
@@ -529,6 +530,44 @@ async def _handle_reel_refinement(message, text: str, user_id: int, session: dic
         await message.reply_text(f"📄 *Промпт:*\n\n{preview}", parse_mode="Markdown", reply_markup=reel_keyboard(user_id))
     except Exception as e:
         await progress.edit_text(f"❌ Ошибка: {e}")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Голосовое сообщение → Groq Whisper → обработка как текст."""
+    message = update.message
+    user_id = update.effective_user.id
+    voice   = message.voice or message.audio
+
+    progress = await message.reply_text("🎤 Слушаю...")
+    try:
+        # Скачиваем голосовое
+        file = await context.bot.get_file(voice.file_id)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = f"{tmpdir}/voice.ogg"
+            await file.download_to_drive(audio_path)
+            await progress.edit_text("🔍 Транскрибирую...")
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(None, transcribe, audio_path)
+
+        if not transcript or len(transcript.strip()) < 2:
+            await progress.edit_text("❌ Не удалось распознать речь. Попробуй ещё раз.")
+            return
+
+        await progress.edit_text(f"📝 Распознано:\n_{transcript}_", parse_mode="Markdown")
+
+        # Обрабатываем текст как обычное сообщение
+        session = user_sessions.get(user_id, {})
+
+        if session.get("state") == "claude_chat":
+            # В режиме чата — отправляем в Claude
+            await _handle_claude_chat(message, transcript, user_id, session)
+        else:
+            # Иначе — классифицируем как заметку/задачу
+            await _process_note(message, transcript, user_id)
+
+    except Exception as e:
+        logger.error(f"voice error: {e}", exc_info=True)
+        await progress.edit_text(f"❌ Ошибка обработки голоса: {e}")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1086,6 +1125,7 @@ def main():
     app.add_handler(CommandHandler("agents",  handle_agents_info))
     app.add_handler(CommandHandler("чат",     handle_chat_command))
     app.add_handler(CommandHandler("chat",    handle_chat_command))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
