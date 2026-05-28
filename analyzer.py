@@ -499,7 +499,7 @@ def preprocess_task(raw_text: str) -> str:
 - Родион — основатель студии Axiom:Void (веб-разработка, Void:Form / Axiom:Core / The Nexus / Absolute Zero)
 - Сайт: ~/Desktop/premium-tiling-website (vanilla HTML/CSS/JS, index.html, axiom-void.dev)
 - Telegram бот: ~/Desktop/qsnera-reels-bot/ (Python: bot.py, analyzer.py)
-- Vault Бизнес: ~/vaults/Бизнес QSNera/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/ | Клиенты/
+- Vault Бизнес: ~/vaults/AxiomVoid/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/ | Клиенты/
 - Vault Техника: ~/vaults/Цифровой мозг/ | Brain/ | Система/ | Саморазвитие/
 - Vault Личное: ~/vaults/Личная жизнь/
 - Агенты: ~/.claude/agents/ | Секреты: ~/.claude/.env
@@ -511,7 +511,7 @@ def preprocess_task(raw_text: str) -> str:
 3. Угадай путь по контексту:
    - упоминает сайт/дизайн/страницу → ~/Desktop/premium-tiling-website
    - упоминает бота/telegram → ~/Desktop/qsnera-reels-bot/
-   - упоминает заметки/задачи/отчёты → ~/vaults/Бизнес QSNera/
+   - упоминает заметки/задачи/отчёты → ~/vaults/AxiomVoid/
    - упоминает агентов/скрипты → ~/.claude/agents/
 4. Если задача касается файлов или git — добавь в конце:
    Требования: git add -A, git pull --rebase перед push, папки vault БЕЗ emoji, коммит с префиксом feat:/fix:/refactor:
