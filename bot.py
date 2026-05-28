@@ -25,7 +25,7 @@ from analyzer import (
     extract_audio, transcribe,
     extract_structured_notes, research_topic,
     generate_claude_prompt, refine_content,
-    format_notes_telegram, classify_note,
+    format_notes_telegram, classify_note, preprocess_task,
     chat_with_claude, analyze_image_in_chat, generate_chat_summary,
 )
 from downloader import download_video
@@ -195,6 +195,12 @@ def agent_keyboard(user_id: int, urgent: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(prio_btn,                     callback_data=prio_data),
         ],
     ])
+
+def task_preview_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Выбрать агента", callback_data=f"task_accept:{user_id}"),
+        InlineKeyboardButton("✏️ Изменить",       callback_data=f"task_redo:{user_id}"),
+    ]])
 
 def note_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
@@ -478,6 +484,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_note_text_edit(message, text, user_id, session)
         return
 
+    # ── Режим правки задачи (после предпросмотра) ──
+    if session.get("state") == "task_editing":
+        await _process_task_edit(message, text, user_id, session)
+        return
+
     # ── Режим смены папки ──
     if session.get("state") == "note_editing_folder":
         await _handle_note_folder_edit(message, text, user_id, session)
@@ -520,15 +531,25 @@ async def _process_note(message, text: str, user_id: int):
         preview = text[:200] + ("..." if len(text) > 200 else "")
 
         if note_type == "task":
-            # Задача → показываем выбор агента
-            user_sessions[user_id]["state"] = "agent_selecting"
+            # Задача → препроцессинг через AI → показываем предпросмотр
+            await progress.edit_text("🤖 Оптимизирую задачу для Claude Code...")
+            optimized = await loop.run_in_executor(None, preprocess_task, text)
+
+            user_sessions[user_id].update({
+                "state":    "task_preview",
+                "text":     optimized,
+                "raw_text": text,
+            })
+
+            raw_prev = text[:120] + ("..." if len(text) > 120 else "")
+            opt_prev = optimized[:700] + ("..." if len(optimized) > 700 else "")
+
             await progress.edit_text(
-                f"⚡ *Задача распознана*\n\n"
-                f"📄 *{title}*\n"
-                f"_{preview}_\n\n"
-                f"*Выбери агента-исполнителя:*",
+                f"🤖 *Задача оптимизирована для Claude Code:*\n\n"
+                f"```\n{opt_prev}\n```\n\n"
+                f"📝 _Исходный:_ {raw_prev}",
                 parse_mode="Markdown",
-                reply_markup=agent_keyboard(user_id)
+                reply_markup=task_preview_keyboard(user_id)
             )
         else:
             # Заметка → обычный флоу
@@ -620,6 +641,30 @@ async def _process_reel(message, url: str, user_id: int):
     except Exception as e:
         logger.error(f"reel error: {e}", exc_info=True)
         await progress.edit_text(f"❌ Ошибка: {e}")
+
+
+async def _process_task_edit(message, text: str, user_id: int, session: dict):
+    """Пользователь исправил задачу → препроцессинг заново → предпросмотр."""
+    progress = await message.reply_text("🤖 Обновляю...")
+    loop = asyncio.get_running_loop()
+    optimized = await loop.run_in_executor(None, preprocess_task, text)
+
+    user_sessions[user_id].update({
+        "state":    "task_preview",
+        "text":     optimized,
+        "raw_text": text,
+    })
+
+    raw_prev = text[:120] + ("..." if len(text) > 120 else "")
+    opt_prev = optimized[:700] + ("..." if len(optimized) > 700 else "")
+
+    await progress.edit_text(
+        f"🤖 *Обновлённая задача:*\n\n"
+        f"```\n{opt_prev}\n```\n\n"
+        f"📝 _Исходный:_ {raw_prev}",
+        parse_mode="Markdown",
+        reply_markup=task_preview_keyboard(user_id)
+    )
 
 
 async def _handle_reel_refinement(message, text: str, user_id: int, session: dict):
@@ -879,6 +924,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
     await query.answer()
     data    = query.data or ""
+
+    # ── Предпросмотр задачи: подтвердить ─────────────────────────────────────
+    if data.startswith("task_accept:"):
+        uid = int(data.split(":")[1])
+        session = user_sessions.get(uid, {})
+        if not session or session.get("state") != "task_preview":
+            await query.message.reply_text("⚠️ Сессия истекла. Напиши задачу снова.")
+            return
+        user_sessions[uid]["state"] = "agent_selecting"
+        user_sessions.touch(uid)
+        await query.edit_message_text(
+            f"⚡ *Задача подтверждена*\n\n"
+            f"📄 *{session.get('title', 'Задача')}*\n\n"
+            f"*Выбери агента-исполнителя:*",
+            parse_mode="Markdown",
+            reply_markup=agent_keyboard(uid)
+        )
+        return
+
+    # ── Предпросмотр задачи: изменить ────────────────────────────────────────
+    if data.startswith("task_redo:"):
+        uid = int(data.split(":")[1])
+        session = user_sessions.get(uid, {})
+        if session:
+            user_sessions[uid]["state"] = "task_editing"
+            user_sessions.touch(uid)
+        await query.edit_message_reply_markup(None)
+        await query.message.reply_text(
+            "✏️ Напиши исправленный вариант задачи\n"
+            "_(или пришли голосовое)_",
+            parse_mode="Markdown"
+        )
+        return
 
     # ── Выбор агента ──────────────────────────────────────────────────────────
     if data.startswith("agt:"):

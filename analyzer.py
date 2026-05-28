@@ -73,24 +73,60 @@ def transcribe(audio_path: str) -> str:
     }
     mime = MIME_TYPES.get(ext, "audio/ogg")
 
-    with open(audio_path, "rb") as f:
-        result = groq_client.audio.transcriptions.create(
-            file=(filename, f, mime),
-            model="whisper-large-v3",
-            response_format="text",
-            language="ru",   # подсказка — основной язык русский (повышает точность)
-        )
-    return result.strip() if result else ""
+    # Пробуем large-v3, при ошибке (лимит/quota) — fallback на turbo (быстрее, чуть дешевле)
+    for whisper_model in ("whisper-large-v3", "whisper-large-v3-turbo"):
+        try:
+            with open(audio_path, "rb") as f:
+                result = groq_client.audio.transcriptions.create(
+                    file=(filename, f, mime),
+                    model=whisper_model,
+                    response_format="text",
+                    language="ru",  # подсказка — основной язык русский (повышает точность)
+                )
+            return result.strip() if result else ""
+        except Exception as e:
+            err = str(e).lower()
+            # Rate limit или quota → пробуем следующую модель
+            if "rate" in err or "quota" in err or "limit" in err or "429" in err:
+                continue
+            raise  # другая ошибка — поднимаем
+    return ""  # обе модели недоступны
 
 
 def _call_openrouter(messages: list, model="anthropic/claude-sonnet-4-6", max_tokens=3000) -> str:
-    resp = requests.post(OR_URL, headers=OR_HEADERS, json={
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-    }, timeout=90)
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    """Вызов OpenRouter с каскадным fallback по моделям.
+
+    Стратегия при ошибке:
+      1. Пробуем основную модель (sonnet-4-6)
+      2. При 402/429/5xx → fallback на haiku-4-5 (в 10x дешевле)
+      3. При повторной ошибке → поднимаем исключение (обрабатывается выше)
+    """
+    # Каскад моделей: основная → дешёвая резервная
+    FALLBACK_MODELS = {
+        "anthropic/claude-sonnet-4-6": "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4.5": "anthropic/claude-haiku-4-5",
+        "anthropic/claude-opus-4-5":   "anthropic/claude-sonnet-4-6",
+    }
+
+    def _do_request(use_model: str) -> str:
+        resp = requests.post(OR_URL, headers=OR_HEADERS, json={
+            "model": use_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }, timeout=90)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    try:
+        return _do_request(model)
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        # 402 = нет баланса, 429 = rate limit, 5xx = сервер недоступен
+        if status in (402, 429) or status >= 500:
+            fallback = FALLBACK_MODELS.get(model)
+            if fallback and fallback != model:
+                return _do_request(fallback)
+        raise
 
 
 # ─── Шаг 1: Структурированный конспект ──────────────────────────────────────
@@ -394,28 +430,32 @@ def classify_note(text: str) -> dict:
 
 Если текст — это задача (что-то нужно сделать, код, автоматизация), верни type: "task"."""
 
-    # Haiku: классификация — простая задача, JSON из 4 полей.
-    # ~15x дешевле sonnet, качества достаточно для routing.
-    response = _call_openrouter(
-        [{"role": "user", "content": prompt}],
-        model="anthropic/claude-haiku-4-5",
-        max_tokens=200,
-    )
-
-    text_r = response.strip()
-    if text_r.startswith("```"):
-        text_r = re.sub(r"^```\w*\n?", "", text_r)
-        text_r = re.sub(r"\n?```$", "", text_r.rstrip())
+    # Haiku: классификация — простая задача, JSON из 4 полей (~15x дешевле sonnet).
+    # При ошибке API (нет баланса, rate limit) → fallback: сохранить в Задачи/ без AI.
     try:
-        result = json.loads(text_r)
+        response = _call_openrouter(
+            [{"role": "user", "content": prompt}],
+            model="anthropic/claude-haiku-4-5",
+            max_tokens=200,
+        )
+        text_r = response.strip()
+        if text_r.startswith("```"):
+            text_r = re.sub(r"^```\w*\n?", "", text_r)
+            text_r = re.sub(r"\n?```$", "", text_r.rstrip())
+        try:
+            result = json.loads(text_r)
+        except Exception:
+            m = re.search(r'\{.*\}', text_r, re.DOTALL)
+            result = None
+            if m:
+                try:
+                    result = json.loads(m.group())
+                except Exception:
+                    pass
     except Exception:
-        m = re.search(r'\{.*\}', text_r, re.DOTALL)
+        # OpenRouter недоступен (нет баланса, rate limit, сеть) →
+        # заметка сохраняется в Задачи/ — Родион увидит и разберёт вручную
         result = None
-        if m:
-            try:
-                result = json.loads(m.group())
-            except Exception:
-                pass
 
     if result is None:
         result = {"vault": DEFAULT_VAULT, "folder": DEFAULT_FOLDER, "title": text[:50], "type": "note"}
@@ -443,6 +483,54 @@ def classify_note(text: str) -> dict:
     result["title"] = title[:60] if title else text[:50]
 
     return result
+
+
+# ─── Task Preprocessor ───────────────────────────────────────────────────────
+
+def preprocess_task(raw_text: str) -> str:
+    """
+    Переводит разговорный текст Родиона в чёткую инженерную задачу для Claude Code.
+    Haiku: дёшево, достаточно для препроцессинга.
+    При ошибке API возвращает оригинал без изменений.
+    """
+    SYSTEM = """Ты — переводчик с "разговорного языка" на "язык задач для Claude Code".
+
+Контекст системы QSNera:
+- Родион — владелец студии QSNera (укладка премиум-плитки, мрамор, натуральный камень)
+- Сайт: ~/Desktop/premium-tiling-website (vanilla HTML/CSS/JS, index.html)
+- Telegram бот: ~/Desktop/qsnera-reels-bot/ (Python: bot.py, analyzer.py)
+- Vault Бизнес: ~/vaults/Бизнес QSNera/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/ | Клиенты/
+- Vault Техника: ~/vaults/Цифровой мозг/ | Brain/ | Система/ | Саморазвитие/
+- Vault Личное: ~/vaults/Личная жизнь/
+- Агенты: ~/.claude/agents/ | Секреты: ~/.claude/.env
+- Отчёты: "Отчёт - Название.md" (именно такой формат)
+
+Алгоритм преобразования:
+1. Убери мусор: "э", "ну", "короче", "типа", "вот", повторы, паузы, незаконченные мысли
+2. Выдели суть: Глагол (Действие) + Объект + конкретный путь к файлу/папке
+3. Угадай путь по контексту:
+   - упоминает сайт/дизайн/страницу → ~/Desktop/premium-tiling-website
+   - упоминает бота/telegram → ~/Desktop/qsnera-reels-bot/
+   - упоминает заметки/задачи/отчёты → ~/vaults/Бизнес QSNera/
+   - упоминает агентов/скрипты → ~/.claude/agents/
+4. Если задача касается файлов или git — добавь в конце:
+   Требования: git add -A, git pull --rebase перед push, папки vault БЕЗ emoji, коммит с префиксом feat:/fix:/refactor:
+
+Верни ТОЛЬКО оптимизированный текст задачи. Без вводных слов. Просто сам текст."""
+
+    try:
+        response = _call_openrouter(
+            [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user",   "content": raw_text},
+            ],
+            model="anthropic/claude-haiku-4-5",
+            max_tokens=500,
+        )
+        optimized = response.strip()
+        return optimized if len(optimized) > 10 else raw_text
+    except Exception:
+        return raw_text  # fallback: вернуть оригинал
 
 
 # ─── Claude Chat ──────────────────────────────────────────────────────────────
