@@ -7,7 +7,7 @@ Axiom:Void Bot — два режима в одном:
 Obsidian структура (СУЩЕСТВУЮЩИЕ папки, без emoji!):
   Бизнес QSNera:  Клиенты/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/
   Цифровой мозг:  Brain/ | Система/ | Саморазвитие/ | Работа над собой/
-  Личная жизнь:   Цели/ | Дневник/
+  Личная жизнь:   Brain/ | Саморазвитие/ | Работа над собой/
 """
 
 import os, re, logging, asyncio, base64, tempfile, subprocess, json, time
@@ -441,8 +441,8 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Reels:* пришли ссылку instagram.com/reel/...\n\n"
         "*Хранилища:*\n"
         "🏢 Бизнес QSNera — клиенты, задачи, маркетинг, сайт\n"
-        "🧠 Цифровой мозг — Brain, Система, Саморазвитие\n"
-        "🏠 Личная жизнь — Цели, Дневник\n\n"
+        "🧠 Цифровой мозг — Brain, Система, Саморазвитие, Работа над собой\n"
+        "🏠 Личная жизнь — Brain, Саморазвитие, Работа над собой\n\n"
         "/статус — статус агентов, очередь задач, последние отчёты\n"
         "/myid — твой Telegram ID\n"
         "/test — полная диагностика системы",
@@ -759,7 +759,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f_bytes = await file.download_as_bytearray()
         img_b64 = base64.b64encode(bytes(f_bytes)).decode()
 
-        question = caption if caption else "Что на этом фото? Опиши профессионально — особенно если это плитка, мрамор, камень или интерьерный дизайн."
+        question = caption if caption else "Что на этом фото? Опиши профессионально — особенно если это UI/UX макет, дизайн-система, скриншот сайта или интерфейс."
 
         loop = asyncio.get_running_loop()
 
@@ -869,7 +869,7 @@ async def handle_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "🤖 *Диалог с Claude*\n\n"
             "Задавай вопросы — я помню контекст всего разговора.\n"
-            "Можешь присылать фото плитки для анализа.\n\n"
+            "Можешь присылать скриншоты, макеты, UI для анализа.\n\n"
             "_/стоп_ — завершить и сохранить конспект в Obsidian",
             parse_mode="Markdown"
         )
@@ -1100,7 +1100,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic  = session["notes"].get("topic", "Reel задача")
         prompt = session["prompt"]
         if GITHUB_TOKEN:
-            loop    = asyncio.get_event_loop()
+            loop    = asyncio.get_running_loop()
             success = await loop.run_in_executor(None, send_task_to_claude_code, topic, prompt)
             if success:
                 await query.message.reply_text(
@@ -1248,7 +1248,7 @@ async def handle_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_agents_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/агенты — показывает список всех агентов и что они умеют."""
     user_id = update.effective_user.id
-    lines = ["🤖 *AI Агенты системы QSNera*\n"]
+    lines = ["🤖 *AI Агенты системы Axiom:Void*\n"]
     for tool, a in AGENTS.items():
         lines.append(
             f"{a['icon']} *{a['title']}*\n"
@@ -1304,7 +1304,7 @@ async def handle_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "⚡ *Создать задачу для агента:*\n\n"
             "Укажи задачу после команды:\n"
-            "`/задача Проанализируй конкурентов в укладке плитки`\n\n"
+            "`/задача Проанализируй конкурентов в нише веб-разработки`\n\n"
             "Или используй /агенты чтобы узнать что умеет каждый агент.",
             parse_mode="Markdown"
         )
@@ -1334,13 +1334,22 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Проверяю статус агентов...")
     res = []
 
-    # ── Читаем session-state.md из GitHub ──
-    raw = github_get_file_content("Brain/session-state.md")
-    if not raw:
-        raw = github_get_file_content("Система/session-state.md")
+    # ── Читаем session-state.md из GitHub (статус агентов) ──
+    state_raw = github_get_file_content("Brain/session-state.md")
+    if not state_raw:
+        state_raw = github_get_file_content("Система/session-state.md")
+    if state_raw:
+        # Берём первые значимые строки (убираем frontmatter)
+        state_body = state_raw
+        if state_raw.startswith("---"):
+            parts_fm = state_raw.split("---", 2)
+            if len(parts_fm) >= 3:
+                state_body = parts_fm[2].strip()
+        state_preview = state_body[:300].strip()
+        if state_preview:
+            res.append(f"\n🗂 *session-state:*\n```\n{state_preview}\n```")
 
-    # ── Читаем лог local-agent из GitHub (последние строки в отчёте) ──
-    # Вместо этого смотрим время последнего коммита local-agent через GitHub API
+    # ── Смотрим время последнего коммита local-agent через GitHub API ──
     try:
         headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
         # Последний коммит к Отчёты/ — показывает активность агента
@@ -1400,7 +1409,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res.append(f"💬 *Активных сессий:* {len(user_sessions)}")
     res.append(f"🕐 *Время сервера:* {datetime.now().strftime('%H:%M %d.%m.%Y')}")
 
-    text = "📊 *Статус системы QSNera*\n\n" + "\n".join(res)
+    text = "📊 *Статус системы Axiom:Void*\n\n" + "\n".join(res)
     await msg.edit_text(text, parse_mode="Markdown")
 
 
@@ -1478,7 +1487,7 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🤖 QSNera AI Bot запущен!")
+    logger.info("🤖 Axiom:Void Bot запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

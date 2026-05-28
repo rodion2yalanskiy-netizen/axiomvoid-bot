@@ -567,15 +567,22 @@ def analyze_image_in_chat(image_base64: str, question: str, chat_history: list =
 
     full_messages = list(chat_history or []) + [user_message]
 
-    resp = requests.post(OR_URL, headers=OR_HEADERS, json={
-        "model": "anthropic/claude-sonnet-4-6",
-        "messages": full_messages,
-        "max_tokens": 2000,
-    }, timeout=90)
-    resp.raise_for_status()
-    response = resp.json()["choices"][0]["message"]["content"]
-
-    return response, user_message
+    for vision_model in ("anthropic/claude-sonnet-4-6", "anthropic/claude-haiku-4-5"):
+        try:
+            resp = requests.post(OR_URL, headers=OR_HEADERS, json={
+                "model": vision_model,
+                "messages": full_messages,
+                "max_tokens": 2000,
+            }, timeout=90)
+            resp.raise_for_status()
+            response = resp.json()["choices"][0]["message"]["content"]
+            return response, user_message
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status in (402, 429) or status >= 500:
+                continue
+            raise
+    raise RuntimeError("Все модели Vision недоступны (нет баланса или rate limit)")
 
 
 def generate_chat_summary(chat_history: list, chat_date: str = None) -> str:
