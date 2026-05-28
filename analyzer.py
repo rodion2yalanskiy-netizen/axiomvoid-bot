@@ -396,7 +396,7 @@ def classify_note(text: str) -> dict:
     DEFAULT_FOLDER = "Задачи"
 
     prompt = f"""Ты помощник для организации заметок в Obsidian для Родиона Яланского.
-Родион — владелец студии QSNera (укладка премиум-плитки, натуральный камень, мрамор).
+Родион — основатель студии Axiom:Void (веб-разработка и цифровые продукты: Void:Form / Axiom:Core / The Nexus / Absolute Zero).
 
 ЗАМЕТКА:
 {text}
@@ -495,9 +495,9 @@ def preprocess_task(raw_text: str) -> str:
     """
     SYSTEM = """Ты — переводчик с "разговорного языка" на "язык задач для Claude Code".
 
-Контекст системы QSNera:
-- Родион — владелец студии QSNera (укладка премиум-плитки, мрамор, натуральный камень)
-- Сайт: ~/Desktop/premium-tiling-website (vanilla HTML/CSS/JS, index.html)
+Контекст системы Axiom:Void:
+- Родион — основатель студии Axiom:Void (веб-разработка, Void:Form / Axiom:Core / The Nexus / Absolute Zero)
+- Сайт: ~/Desktop/premium-tiling-website (vanilla HTML/CSS/JS, index.html, axiom-void.dev)
 - Telegram бот: ~/Desktop/qsnera-reels-bot/ (Python: bot.py, analyzer.py)
 - Vault Бизнес: ~/vaults/Бизнес QSNera/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/ | Клиенты/
 - Vault Техника: ~/vaults/Цифровой мозг/ | Brain/ | Система/ | Саморазвитие/
