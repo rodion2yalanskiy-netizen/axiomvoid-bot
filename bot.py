@@ -175,6 +175,20 @@ AGENTS = {
 
 # ─── Клавиатуры ─────────────────────────────────────────────────────────────
 
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Главное меню — 4 кнопки режимов работы."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Задача для Claude",  callback_data="menu:task"),
+            InlineKeyboardButton("📝 Заметка",           callback_data="menu:note"),
+        ],
+        [
+            InlineKeyboardButton("💬 Чат с Claude",      callback_data="menu:chat"),
+            InlineKeyboardButton("📋 Отчёты",            callback_data="menu:reports"),
+        ],
+    ])
+
+
 def reel_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Отправить в Claude Code", callback_data=f"reel_confirm:{user_id}"),
@@ -191,14 +205,7 @@ def agent_keyboard(user_id: int, urgent: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(AGENTS["openrouter"]["btn"],  callback_data=f"agt:{user_id}:openrouter"),
         ],
         [
-            InlineKeyboardButton(AGENTS["vision"]["btn"],      callback_data=f"agt:{user_id}:vision"),
-            InlineKeyboardButton(AGENTS["images"]["btn"],      callback_data=f"agt:{user_id}:images"),
-        ],
-        [
-            InlineKeyboardButton(AGENTS["antigravity"]["btn"], callback_data=f"agt:{user_id}:antigravity"),
             InlineKeyboardButton("✏️ Изменить задачу",         callback_data=f"agt:{user_id}:edit"),
-        ],
-        [
             InlineKeyboardButton(prio_btn,                     callback_data=prio_data),
         ],
     ])
@@ -415,22 +422,15 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _save_owner_chat_id(update.effective_user.id)
     await update.message.reply_text(
         "👋 *Axiom:Void Bot*\n\n"
-        "Я умею:\n\n"
-        "📝 *Создавать заметки* — просто напиши что угодно текстом\n"
-        "🎤 *Голосовые* — говори голосом, пойму и классифицирую\n"
-        "📷 *Анализировать фото* — пришли скриншот, макет или UI\n"
-        "🎬 *Анализировать Reels* — пришли ссылку на Instagram\n"
-        "⚡ *Задача агенту* — /задача + выбор агента\n"
-        "💬 *Диалог с Claude* — /чат для многоходового разговора\n"
-        "🤖 *Все агенты* — /агенты\n"
-        "📋 *Читать отчёты* — /отчёты\n\n"
-        "Примеры:\n"
-        "• _«Встреча с клиентом по проекту Void:Form»_ → заметка в Клиенты/\n"
-        "• _«Задача: сделай лендинг под Axiom:Core»_ → выбор агента → отчёт сюда\n"
-        "• [скриншот UI] → анализ дизайна + сохранение\n"
-        "• instagram.com/reel/... → анализ + промпт для агента\n\n"
-        "Команды: /задача /чат /агенты /отчёты /статус /help /myid",
-        parse_mode="Markdown"
+        "Выбери что хочешь сделать — или просто напиши текст / пришли голосовое:\n\n"
+        "📝 *Заметка* — любой текст или голос → Claude определит куда сохранить\n"
+        "✅ *Задача* — напиши _«задача: ...»_ или нажми кнопку\n"
+        "💬 *Чат* — многоходовой диалог с Claude\n"
+        "📋 *Отчёты* — последние выполненные задачи\n"
+        "🎬 *Reels* — пришли ссылку instagram.com/reel/...\n\n"
+        "_Доп. команды:_ /агенты /статус /помощь /myid",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
     )
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,6 +481,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_claude_chat(message, text, user_id, session)
         return
 
+    # ── Режим ввода задачи (через кнопку меню «Задача») ──
+    if session.get("state") == "awaiting_task_text":
+        user_sessions.pop(user_id, None)
+        await _process_task_direct(message, text, user_id)
+        return
+
+    # ── Режим ввода заметки (через кнопку меню «Заметка») ──
+    if session.get("state") == "awaiting_note_text":
+        user_sessions.pop(user_id, None)
+        await _process_note(message, text, user_id)
+        return
+
     # ── Режим правки Reels ──
     if session.get("state") == "reel_editing":
         await _handle_reel_refinement(message, text, user_id, session)
@@ -506,8 +518,64 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _process_reel(message, text.split()[0], user_id)
         return
 
+    # ── Задача по prefix → прямо в task_preview, минуя classify_note ──
+    _TASK_PREFIXES = ("задача:", "задача :", "task:", "сделай:", "выполни:")
+    if any(text.lower().startswith(p) for p in _TASK_PREFIXES):
+        await _process_task_direct(message, text, user_id)
+        return
+
     # ── Любой другой текст → режим заметок ──
     await _process_note(message, text, user_id)
+
+
+async def _process_task_direct(message, text: str, user_id: int):
+    """Задача с prefix «задача:» → прямо в task_preview, минуя classify_note.
+    Причина: classify_note(Haiku) игнорирует синтаксический prefix и смотрит
+    на семантику («личная жизнь» → vault Личная жизнь) — приводит к неправильному vault.
+    """
+    progress = await message.reply_text("🤖 Формирую структурированный промпт...")
+    try:
+        loop = asyncio.get_running_loop()
+        optimized = await loop.run_in_executor(None, preprocess_task, text)
+
+        # Извлекаем заголовок из первой строки (без prefix)
+        _TASK_PREFIXES_LIST = ("задача:", "задача :", "task:", "сделай:", "выполни:")
+        first_line = text.split("\n")[0].strip()
+        for prefix in _TASK_PREFIXES_LIST:
+            if first_line.lower().startswith(prefix):
+                first_line = first_line[len(prefix):].strip()
+                break
+        title = first_line[:60] if first_line else f"Задача {datetime.now().strftime('%d.%m %H:%M')}"
+
+        user_sessions[user_id] = {
+            "state":    "task_preview",
+            "text":     optimized,
+            "raw_text": text,
+            "vault":    "Бизнес QSNera",
+            "folder":   "Задачи",
+            "title":    title,
+            "type":     "task",
+        }
+
+        raw_prev = text[:100] + ("..." if len(text) > 100 else "")
+        opt_prev = optimized[:1200] + ("\n\n_...промпт продолжается_" if len(optimized) > 1200 else "")
+
+        try:
+            await progress.edit_text(
+                f"📋 *Промпт для Claude Code сформирован:*\n\n"
+                f"{opt_prev}\n\n"
+                f"---\n_Исходник:_ `{raw_prev}`",
+                parse_mode="Markdown",
+                reply_markup=task_preview_keyboard(user_id)
+            )
+        except Exception:
+            await progress.edit_text(
+                f"📋 Промпт для Claude Code:\n\n{opt_prev}\n\n---\nИсходник: {raw_prev}",
+                reply_markup=task_preview_keyboard(user_id)
+            )
+    except Exception as e:
+        logger.error(f"_process_task_direct error: {e}", exc_info=True)
+        await progress.edit_text(f"❌ Ошибка: {e}")
 
 
 async def _process_note(message, text: str, user_id: int):
@@ -940,6 +1008,55 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data    = query.data or ""
 
+    # ── Главное меню ─────────────────────────────────────────────────────────
+    if data.startswith("menu:"):
+        action = data.split(":")[1]
+        uid = update.effective_user.id
+        if action == "task":
+            user_sessions[uid] = {"state": "awaiting_task_text"}
+            await query.edit_message_reply_markup(None)
+            await query.message.reply_text(
+                "✅ *Задача для Claude*\n\nОпиши задачу — я сформирую структурированный промпт.\n"
+                "_Или напиши «задача: ...» в любой момент._",
+                parse_mode="Markdown"
+            )
+        elif action == "note":
+            user_sessions[uid] = {"state": "awaiting_note_text"}
+            await query.edit_message_reply_markup(None)
+            await query.message.reply_text(
+                "📝 *Заметка*\n\nНапиши что угодно — текстом или голосом.",
+                parse_mode="Markdown"
+            )
+        elif action == "chat":
+            user_sessions[uid] = {"state": "claude_chat", "history": []}
+            await query.edit_message_reply_markup(None)
+            await query.message.reply_text(
+                "💬 *Диалог с Claude*\n\nЗадавай вопросы — помню контекст разговора.\n"
+                "_/стоп — завершить и сохранить конспект._",
+                parse_mode="Markdown"
+            )
+        elif action == "reports":
+            await query.edit_message_reply_markup(None)
+            # Переиспользуем handle_reports логику
+            loop = asyncio.get_running_loop()
+            reports = await loop.run_in_executor(None, github_get_reports)
+            if not reports:
+                await query.message.reply_text("📭 Отчётов пока нет.")
+                return
+            report_cache[uid] = reports
+            buttons = []
+            for i, r in enumerate(reports):
+                name = r["name"].replace("Отчёт: ", "").replace(".md", "")
+                if len(name) > 38:
+                    name = name[:35] + "..."
+                buttons.append([InlineKeyboardButton(f"📄 {name}", callback_data=f"rpt_view:{i}")])
+            await query.message.reply_text(
+                "📋 *Последние отчёты:*\nНажми чтобы прочитать:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode="Markdown"
+            )
+        return
+
     # ── Предпросмотр задачи: подтвердить ─────────────────────────────────────
     if data.startswith("task_accept:"):
         uid = int(data.split(":")[1])
@@ -1349,10 +1466,23 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Проверяю статус агентов...")
     res = []
 
-    # ── Читаем session-state.md из GitHub (статус агентов) ──
-    state_raw = github_get_file_content("Brain/session-state.md")
+    # ── Читаем session-state.md из digital-brain-vault (не из DEFAULT_REPO!) ──
+    # Файл находится в Цифровой мозг / Brain/, а DEFAULT_REPO = qsnera-vault
+    import urllib.parse as _uparse
+    _brain_url = (
+        "https://api.github.com/repos/rodion2yalanskiy-netizen/digital-brain-vault"
+        f"/contents/{_uparse.quote('Brain/session-state.md')}"
+    )
+    _brain_headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    state_raw = ""
+    try:
+        _r = requests.get(_brain_url, headers=_brain_headers, timeout=10)
+        if _r.status_code == 200:
+            state_raw = base64.b64decode(_r.json().get("content", "")).decode("utf-8")
+    except Exception:
+        pass
     if not state_raw:
-        state_raw = github_get_file_content("Система/session-state.md")
+        state_raw = github_get_file_content("Brain/session-state.md")
     if state_raw:
         # Берём первые значимые строки (убираем frontmatter)
         state_body = state_raw
@@ -1484,6 +1614,8 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_error_handler(handle_error)
     app.add_handler(CommandHandler("start",   handle_start))
+    app.add_handler(CommandHandler("menu",    handle_start))
+    app.add_handler(CommandHandler("меню",   handle_start))
     app.add_handler(CommandHandler("help",    handle_help))
     app.add_handler(CommandHandler("myid",    handle_myid))
     app.add_handler(CommandHandler("test",    handle_test))
@@ -1507,3 +1639,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
