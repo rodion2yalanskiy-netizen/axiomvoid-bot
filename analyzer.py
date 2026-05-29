@@ -498,7 +498,7 @@ def preprocess_task(raw_text: str) -> str:
 ━━━ КОНТЕКСТ СИСТЕМЫ AXIOM:VOID ━━━
 Владелец: Родион Яланский, основатель студии Axiom:Void
 Пути:
-- Сайт:         ~/Desktop/premium-tiling-website/
+- Сайт:         ~/Desktop/axiom-void-website/
 - Telegram бот: ~/Desktop/qsnera-reels-bot/ (bot.py, analyzer.py)
 - Vault бизнес: ~/vaults/AxiomVoid/ → Задачи/ | Отчёты/ | Маркетинг/ | Клиенты/
 - Vault мозг:   ~/vaults/Цифровой мозг/ → Brain/
