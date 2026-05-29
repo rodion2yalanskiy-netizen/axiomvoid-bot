@@ -1028,6 +1028,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data    = query.data or ""
 
+    # ── Worker: Отмена / Одобрение инструментов ───────────────────────────────
+    if data.startswith("worker_"):
+        await _handle_worker_callback(query, data)
+        return
+
     # ── Главное меню ─────────────────────────────────────────────────────────
     if data.startswith("menu:"):
         action = data.split(":")[1]
@@ -1318,6 +1323,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         user_sessions[user_id]["state"] = "note_editing_folder"
+
+
+# ─── Worker callbacks (Отмена / Одобрение инструментов) ──────────────────────
+
+WORKER_CONTROL = "/tmp/claude-worker-control"
+
+def _write_control(filename: str):
+    import os
+    os.makedirs(WORKER_CONTROL, exist_ok=True)
+    open(f"{WORKER_CONTROL}/{filename}", "w").close()
+
+async def _handle_worker_callback(query, data: str):
+    """Обрабатывает кнопки от telegram-worker: отмена и одобрение инструментов."""
+    await query.answer()
+    parts = data.split(":")
+
+    if parts[0] == "worker_cancel" and len(parts) >= 2:
+        task_id = parts[1]
+        _write_control(f"cancel_{task_id}")
+        await query.edit_message_reply_markup(None)
+        await query.message.reply_text("🛑 Сигнал отмены отправлен. Задача остановится через несколько секунд.")
+
+    elif parts[0] == "worker_approve" and len(parts) >= 3:
+        task_id, tool = parts[1], parts[2]
+        _write_control(f"approve_{task_id}_{tool}")
+        await query.edit_message_reply_markup(None)
+        await query.message.reply_text(f"✅ `{tool}` разрешён. Claude продолжает.", parse_mode="Markdown")
+
+    elif parts[0] == "worker_deny" and len(parts) >= 3:
+        task_id, tool = parts[1], parts[2]
+        _write_control(f"deny_{task_id}_{tool}")
+        await query.edit_message_reply_markup(None)
+        await query.message.reply_text(f"❌ `{tool}` запрещён. Claude адаптируется.", parse_mode="Markdown")
 
 
 # ─── Тест ────────────────────────────────────────────────────────────────────
