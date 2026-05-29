@@ -329,12 +329,12 @@ def github_get_reports(limit: int = 7) -> list:
         return []
 
 
-def github_get_file_content(path: str) -> str:
+def github_get_file_content(path: str, repo: str = DEFAULT_REPO) -> str:
     """Загружает содержимое файла из GitHub (декодирует из base64)."""
     import urllib.parse
     if not GITHUB_TOKEN:
         return ""
-    url = f"https://api.github.com/repos/{DEFAULT_REPO}/contents/{urllib.parse.quote(path)}"
+    url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}"
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
@@ -1466,23 +1466,11 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔍 Проверяю статус агентов...")
     res = []
 
-    # ── Читаем session-state.md из digital-brain-vault (не из DEFAULT_REPO!) ──
-    # Файл находится в Цифровой мозг / Brain/, а DEFAULT_REPO = qsnera-vault
-    import urllib.parse as _uparse
-    _brain_url = (
-        "https://api.github.com/repos/rodion2yalanskiy-netizen/digital-brain-vault"
-        f"/contents/{_uparse.quote('Brain/session-state.md')}"
-    )
-    _brain_headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-    state_raw = ""
-    try:
-        _r = requests.get(_brain_url, headers=_brain_headers, timeout=10)
-        if _r.status_code == 200:
-            state_raw = base64.b64decode(_r.json().get("content", "")).decode("utf-8")
-    except Exception:
-        pass
+    # ── Читаем session-state.md из digital-brain-vault (там живёт Brain/) ──
+    BRAIN_REPO = "rodion2yalanskiy-netizen/digital-brain-vault"
+    state_raw = github_get_file_content("Brain/session-state.md", repo=BRAIN_REPO)
     if not state_raw:
-        state_raw = github_get_file_content("Brain/session-state.md")
+        state_raw = github_get_file_content("Система/session-state.md", repo=BRAIN_REPO)
     if state_raw:
         # Берём первые значимые строки (убираем frontmatter)
         state_body = state_raw
