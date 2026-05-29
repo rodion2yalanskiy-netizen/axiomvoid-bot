@@ -53,6 +53,13 @@ VAULT_REPOS = {
 }
 DEFAULT_REPO = "rodion2yalanskiy-netizen/qsnera-vault"
 
+# Отображаемые имена vault'ов в UI (роутинг-ключи не меняем!)
+VAULT_DISPLAY = {
+    "Бизнес QSNera": "AxiomVoid",
+    "Цифровой мозг": "Цифровой мозг",
+    "Личная жизнь":  "Личная жизнь",
+}
+
 # ─── Сессии с TTL и персистентностью ─────────────────────────────────────────
 # state: "reel_confirming" | "reel_editing" | "note_confirming" | "note_editing"
 #        "agent_selecting" | "note_editing_folder" | "claude_chat"
@@ -532,7 +539,7 @@ async def _process_note(message, text: str, user_id: int):
 
         if note_type == "task":
             # Задача → препроцессинг через AI → показываем предпросмотр
-            await progress.edit_text("🤖 Оптимизирую задачу для Claude Code...")
+            await progress.edit_text("🤖 Формирую структурированный промпт...")
             optimized = await loop.run_in_executor(None, preprocess_task, text)
 
             user_sessions[user_id].update({
@@ -541,21 +548,29 @@ async def _process_note(message, text: str, user_id: int):
                 "raw_text": text,
             })
 
-            raw_prev = text[:120] + ("..." if len(text) > 120 else "")
-            opt_prev = optimized[:700] + ("..." if len(optimized) > 700 else "")
+            raw_prev = text[:100] + ("..." if len(text) > 100 else "")
+            # Показываем первые 1200 символов промпта — достаточно чтобы увидеть структуру
+            opt_prev = optimized[:1200] + ("\n\n_...промпт продолжается_" if len(optimized) > 1200 else "")
 
-            await progress.edit_text(
-                f"🤖 *Задача оптимизирована для Claude Code:*\n\n"
-                f"```\n{opt_prev}\n```\n\n"
-                f"📝 _Исходный:_ {raw_prev}",
-                parse_mode="Markdown",
-                reply_markup=task_preview_keyboard(user_id)
-            )
+            try:
+                await progress.edit_text(
+                    f"📋 *Промпт для Claude Code сформирован:*\n\n"
+                    f"{opt_prev}\n\n"
+                    f"---\n_Исходник:_ `{raw_prev}`",
+                    parse_mode="Markdown",
+                    reply_markup=task_preview_keyboard(user_id)
+                )
+            except Exception:
+                # Если Markdown не прошёл — plain text
+                await progress.edit_text(
+                    f"📋 Промпт для Claude Code:\n\n{opt_prev}\n\n---\nИсходник: {raw_prev}",
+                    reply_markup=task_preview_keyboard(user_id)
+                )
         else:
             # Заметка → обычный флоу
             await progress.edit_text(
                 f"📝 *Заметка*\n\n"
-                f"📁 *{vault_emoji} {vault}* / `{folder}/`\n"
+                f"📁 *{vault_emoji} {VAULT_DISPLAY.get(vault, vault)}* / `{folder}/`\n"
                 f"📄 *{title}*\n\n"
                 f"_{preview}_",
                 parse_mode="Markdown",
@@ -580,7 +595,7 @@ async def _handle_note_folder_edit(message, text: str, user_id: int, session: di
         vault_emoji = {"Бизнес QSNera": "🏢", "Цифровой мозг": "🧠", "Личная жизнь": "🏠"}.get(vault, "📁")
         await message.reply_text(
             f"📂 Папка обновлена\n\n"
-            f"📁 *{vault_emoji} {vault}* / `{folder}/`\n"
+            f"📁 *{vault_emoji} {VAULT_DISPLAY.get(vault, vault)}* / `{folder}/`\n"
             f"📄 *{session['title']}*",
             parse_mode="Markdown",
             reply_markup=note_keyboard(user_id)
@@ -598,7 +613,7 @@ async def _handle_note_text_edit(message, text: str, user_id: int, session: dict
     vault_emoji = {"Бизнес QSNera": "🏢", "Цифровой мозг": "🧠", "Личная жизнь": "🏠"}.get(vault, "📁")
     await message.reply_text(
         f"✏️ Текст обновлён\n\n"
-        f"📁 *{vault_emoji} {vault}* / `{folder}/`\n"
+        f"📁 *{vault_emoji} {VAULT_DISPLAY.get(vault, vault)}* / `{folder}/`\n"
         f"📄 *{title}*",
         parse_mode="Markdown",
         reply_markup=note_keyboard(user_id)
@@ -1144,7 +1159,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             vault_emoji = {"Бизнес QSNera": "🏢", "Цифровой мозг": "🧠", "Личная жизнь": "🏠"}.get(vault, "📁")
             if success:
                 await query.message.reply_text(
-                    f"✅ *Заметка сохранена!*\n\n{vault_emoji} {vault}\n📂 `{folder}/{title}.md`\n\nПоявится в Obsidian через ~5 мин.",
+                    f"✅ *Заметка сохранена!*\n\n{vault_emoji} {VAULT_DISPLAY.get(vault, vault)}\n📂 `{folder}/{title}.md`\n\nПоявится в Obsidian через ~5 мин.",
                     parse_mode="Markdown"
                 )
             else:
