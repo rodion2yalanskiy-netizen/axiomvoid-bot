@@ -489,48 +489,91 @@ def classify_note(text: str) -> dict:
 
 def preprocess_task(raw_text: str) -> str:
     """
-    Переводит разговорный текст Родиона в чёткую инженерную задачу для Claude Code.
-    Haiku: дёшево, достаточно для препроцессинга.
+    Переводит разговорный текст Родиона в полноценный структурированный промпт для Claude Code.
+    Использует Sonnet для качественной генерации, Haiku как fallback.
     При ошибке API возвращает оригинал без изменений.
     """
-    SYSTEM = """Ты — переводчик с "разговорного языка" на "язык задач для Claude Code".
+    SYSTEM = """Ты — архитектор задач. Преобразуй разговорный запрос в ПОЛНЫЙ, САМОДОСТАТОЧНЫЙ промпт для Claude Code.
 
-Контекст системы Axiom:Void:
-- Родион — основатель студии Axiom:Void (веб-разработка, Void:Form / Axiom:Core / The Nexus / Absolute Zero)
-- Сайт: ~/Desktop/premium-tiling-website (vanilla HTML/CSS/JS, index.html, axiom-void.dev)
-- Telegram бот: ~/Desktop/qsnera-reels-bot/ (Python: bot.py, analyzer.py)
-- Vault Бизнес: ~/vaults/AxiomVoid/ | Задачи/ | Отчёты/ | Маркетинг/ | Сайт/ | Клиенты/
-- Vault Техника: ~/vaults/Цифровой мозг/ | Brain/ | Система/ | Саморазвитие/
-- Vault Личное: ~/vaults/Личная жизнь/
-- Агенты: ~/.claude/agents/ | Секреты: ~/.claude/.env
-- Отчёты: "Отчёт - Название.md" (именно такой формат)
+━━━ КОНТЕКСТ СИСТЕМЫ AXIOM:VOID ━━━
+Владелец: Родион Яланский, основатель студии Axiom:Void
+Сервисы: Void:Form (UI/UX) | Axiom:Core (backend) | The Nexus (AI/API) | Absolute Zero (аудит)
 
-Алгоритм преобразования:
-1. Убери мусор: "э", "ну", "короче", "типа", "вот", повторы, паузы, незаконченные мысли
-2. Выдели суть: Глагол (Действие) + Объект + конкретный путь к файлу/папке
-3. Угадай путь по контексту:
-   - упоминает сайт/дизайн/страницу → ~/Desktop/premium-tiling-website
-   - упоминает бота/telegram → ~/Desktop/qsnera-reels-bot/
-   - упоминает заметки/задачи/отчёты → ~/vaults/AxiomVoid/
-   - упоминает агентов/скрипты → ~/.claude/agents/
-4. Если задача касается файлов или git — добавь в конце:
-   Требования: git add -A, git pull --rebase перед push, папки vault БЕЗ emoji, коммит с префиксом feat:/fix:/refactor:
+Ключевые пути:
+- Сайт:       ~/Desktop/premium-tiling-website/index.html (vanilla HTML/CSS/JS, axiom-void.dev)
+- Telegram бот: ~/Desktop/qsnera-reels-bot/ (bot.py, analyzer.py, downloader.py)
+- Vault бизнес: ~/vaults/AxiomVoid/ → Задачи/ | Отчёты/ | Маркетинг/ | Сайт/ | Клиенты/
+- Vault техника: ~/vaults/Цифровой мозг/ → Brain/ | Система/ | Саморазвитие/
+- Vault личное: ~/vaults/Личная жизнь/
+- Агенты:     ~/.claude/agents/ (local-agent.sh, vault-sync.sh, vault-guardian.sh, daily-self-dev.sh)
+- Секреты:    ~/.claude/.env
+- CLAUDE.md:  ~/.claude/CLAUDE.md (глобальные инструкции)
 
-Верни ТОЛЬКО оптимизированный текст задачи. Без вводных слов. Просто сам текст."""
+━━━ ПРАВИЛА ГЕНЕРАЦИИ ━━━
+Сгенерируй промпт СТРОГО в этом формате (все секции обязательны):
 
+## 🎯 Задача
+[1-2 предложения — что именно нужно сделать]
+
+## 🤖 AI Dispatcher
+Перед выполнением прочитай ~/.claude/agents/dispatcher.md и активируй нужных агентов:
+Агенты для этой задачи: [выбери из: Tech Lead | Frontend Dev | Backend Dev | DevOps | QA Tester | Marketer | Designer | Researcher]
+Tech Lead делает финальное ревью после всех агентов.
+
+## 📋 Шаги выполнения
+[нумерованный список конкретных действий с путями к файлам]
+
+## 📁 Файлы и ресурсы
+[список конкретных файлов/папок которые нужно прочитать, изменить, создать]
+
+## ⚙️ Технические требования
+- git add -A (всегда, emoji-папки ломают именованные пути)
+- git pull --rebase перед push
+- Папки vault БЕЗ emoji (критично для iOS Obsidian Sync)
+- Коммиты: feat: / fix: / refactor: / chore:
+[добавь специфичные для задачи требования]
+
+## ✅ Ожидаемый результат
+[что конкретно должно получиться на выходе]
+
+## 📝 Отчёт
+Сохранить в: ~/vaults/AxiomVoid/Отчёты/Отчёт - [Краткое название].md
+Уведомить через Telegram с кратким итогом.
+
+━━━ ВАЖНО ━━━
+- Конкретные пути к файлам — без "возможно" и "скорее всего"
+- Шаги должны быть выполнимы без дополнительных вопросов
+- Если задача связана с кодом — укажи что именно изменить
+- Верни ТОЛЬКО промпт. Никаких вступлений."""
+
+    # Sonnet для качественной генерации структурированного промпта
+    # Haiku как fallback при ошибке баланса/rate limit
     try:
         response = _call_openrouter(
             [
                 {"role": "system", "content": SYSTEM},
                 {"role": "user",   "content": raw_text},
             ],
-            model="anthropic/claude-haiku-4-5",
-            max_tokens=500,
+            model="anthropic/claude-sonnet-4-6",
+            max_tokens=1500,
         )
         optimized = response.strip()
-        return optimized if len(optimized) > 10 else raw_text
+        return optimized if len(optimized) > 50 else raw_text
     except Exception:
-        return raw_text  # fallback: вернуть оригинал
+        # Fallback на Haiku
+        try:
+            response = _call_openrouter(
+                [
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user",   "content": raw_text},
+                ],
+                model="anthropic/claude-haiku-4-5",
+                max_tokens=1000,
+            )
+            optimized = response.strip()
+            return optimized if len(optimized) > 50 else raw_text
+        except Exception:
+            return raw_text  # последний fallback: оригинал
 
 
 # ─── Claude Chat ──────────────────────────────────────────────────────────────
