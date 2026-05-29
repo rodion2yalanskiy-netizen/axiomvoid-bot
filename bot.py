@@ -528,11 +528,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _process_note(message, text, user_id)
 
 
+_VAGUE_PATTERNS = (
+    "все проблемы", "всё исправь", "всё починить", "полный аудит",
+    "разбери всё", "сделай всё", "реши всё", "исправь всё",
+    "проверь всё", "all problems", "fix everything", "audit all",
+)
+
 async def _process_task_direct(message, text: str, user_id: int):
-    """Задача с prefix «задача:» → прямо в task_preview, минуя classify_note.
-    Причина: classify_note(Haiku) игнорирует синтаксический prefix и смотрит
-    на семантику («личная жизнь» → vault Личная жизнь) — приводит к неправильному vault.
-    """
+    """Задача с prefix «задача:» → прямо в task_preview, минуя classify_note."""
+    # Защита от мега-задач — предупреждаем до генерации промпта
+    text_lower = text.lower()
+    is_vague = any(p in text_lower for p in _VAGUE_PATTERNS)
+    if is_vague:
+        await message.reply_text(
+            "⚠️ *Задача слишком широкая*\n\n"
+            "Такие задачи как «исправь все проблемы» или «сделай полный аудит» "
+            "всегда заканчиваются таймаутом — Claude Code не успевает за 30 минут.\n\n"
+            "*Сформулируй конкретнее, например:*\n"
+            "• `задача: исправь ошибку X в файле Y`\n"
+            "• `задача: подключи GitHub к Railway`\n"
+            "• `задача: почини шаг 3 в daily-self-dev.sh`\n\n"
+            "_Одна задача = одна конкретная цель._",
+            parse_mode="Markdown"
+        )
+        return
+
     progress = await message.reply_text("🤖 Формирую структурированный промпт...")
     try:
         loop = asyncio.get_running_loop()
