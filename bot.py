@@ -1328,31 +1328,53 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Worker callbacks (Отмена / Одобрение инструментов) ──────────────────────
 
 WORKER_CONTROL = "/tmp/claude-worker-control"
+import re as _re
+_SAFE_ID = _re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
 def _write_control(filename: str):
     import os
-    os.makedirs(WORKER_CONTROL, exist_ok=True)
-    open(f"{WORKER_CONTROL}/{filename}", "w").close()
+    base = WORKER_CONTROL
+    os.makedirs(base, exist_ok=True)
+    path = os.path.realpath(os.path.join(base, filename))
+    # Containment check — путь должен оставаться внутри WORKER_CONTROL
+    if not path.startswith(os.path.realpath(base) + os.sep):
+        raise ValueError(f"Path traversal blocked: {filename}")
+    os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
 async def _handle_worker_callback(query, data: str):
     """Обрабатывает кнопки от telegram-worker: отмена и одобрение инструментов."""
     await query.answer()
+
+    # Только владелец бота может управлять воркером
+    if query.from_user.id != ADMIN_CHAT_ID:
+        await query.answer("Нет доступа", show_alert=True)
+        return
+
     parts = data.split(":")
 
     if parts[0] == "worker_cancel" and len(parts) >= 2:
         task_id = parts[1]
+        if not _SAFE_ID.match(task_id):
+            await query.answer("Неверный ID", show_alert=True)
+            return
         _write_control(f"cancel_{task_id}")
         await query.edit_message_reply_markup(None)
         await query.message.reply_text("🛑 Сигнал отмены отправлен. Задача остановится через несколько секунд.")
 
     elif parts[0] == "worker_approve" and len(parts) >= 3:
         task_id, tool = parts[1], parts[2]
+        if not _SAFE_ID.match(task_id) or not _SAFE_ID.match(tool):
+            await query.answer("Неверные параметры", show_alert=True)
+            return
         _write_control(f"approve_{task_id}_{tool}")
         await query.edit_message_reply_markup(None)
         await query.message.reply_text(f"✅ `{tool}` разрешён. Claude продолжает.", parse_mode="Markdown")
 
     elif parts[0] == "worker_deny" and len(parts) >= 3:
         task_id, tool = parts[1], parts[2]
+        if not _SAFE_ID.match(task_id) or not _SAFE_ID.match(tool):
+            await query.answer("Неверные параметры", show_alert=True)
+            return
         _write_control(f"deny_{task_id}_{tool}")
         await query.edit_message_reply_markup(None)
         await query.message.reply_text(f"❌ `{tool}` запрещён. Claude адаптируется.", parse_mode="Markdown")
