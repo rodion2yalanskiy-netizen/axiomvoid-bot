@@ -22,7 +22,7 @@ import requests
 from datetime import datetime
 from groq import Groq
 
-GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
+GROQ_API_KEY       = os.environ.get("GROQ_API_KEY") or ""
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -83,14 +83,21 @@ def transcribe(audio_path: str) -> str:
                     response_format="text",
                     language="ru",  # подсказка — основной язык русский (повышает точность)
                 )
-            return result.strip() if result else ""
+            transcript = result.strip() if result else ""
+            if ext == ".mp3":  # cleanup tmp .mp3 от extract_audio
+                try: os.remove(audio_path)
+                except OSError: pass
+            return transcript
         except Exception as e:
             err = str(e).lower()
             # Rate limit или quota → пробуем следующую модель
             if "rate" in err or "quota" in err or "limit" in err or "429" in err:
                 continue
             raise  # другая ошибка — поднимаем
-    return ""  # обе модели недоступны
+    if ext == ".mp3":  # cleanup tmp .mp3 перед raise
+        try: os.remove(audio_path)
+        except OSError: pass
+    raise Exception("Groq Whisper недоступен: обе модели вернули rate limit/quota")
 
 
 def _call_openrouter(messages: list, model="anthropic/claude-sonnet-4-6", max_tokens=3000) -> str:
