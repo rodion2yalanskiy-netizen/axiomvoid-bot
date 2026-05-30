@@ -64,7 +64,9 @@ VAULT_DISPLAY = {
 # state: "reel_confirming" | "reel_editing" | "note_confirming" | "note_editing"
 #        "agent_selecting" | "note_editing_folder" | "claude_chat"
 SESSION_TTL  = 3600                              # 1 час — сессия живёт без активности
-SESSION_FILE = Path("/tmp/bot_sessions.json")    # переживает crash/graceful restart
+SESSION_FILE = Path(os.environ.get("SESSION_FILE_PATH", "/tmp/bot_sessions.json"))
+# На Railway /tmp сбрасывается при деплое — задать SESSION_FILE_PATH в Variables
+# для сохранения сессий. Пример: SESSION_FILE_PATH=/app/sessions.json
 
 def _persist(data: dict):
     try:
