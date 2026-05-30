@@ -597,12 +597,9 @@ async def _nc_handle_budget(message, text: str, user_id: int, session: dict):
     email        = session.get("nc_email", "")
     project_type = session.get("nc_type", "")
     budget       = text
-    logger.info(f"_nc_handle_budget: name={name!r} email={email!r} type={project_type!r} budget={budget!r} gh_token_ok={bool(GITHUB_TOKEN)}")
-
     loop     = asyncio.get_running_loop()
     ok_file  = await loop.run_in_executor(None, create_client_file, name, email, project_type, budget)
     ok_crm   = await loop.run_in_executor(None, update_crm_overview, name, "lead", budget)
-    logger.info(f"_nc_handle_budget result: ok_file={ok_file} ok_crm={ok_crm}")
     user_sessions.pop(user_id, None)
 
     if ok_file:
