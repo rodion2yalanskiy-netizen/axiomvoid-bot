@@ -44,6 +44,10 @@ RAILWAY_TOKEN  = os.environ.get("RAILWAY_API_TOKEN", "")
 RAILWAY_SVC_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
 RAILWAY_ENV_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
 
+# CRM / Stripe
+AXIOMVOID_REPO    = "rodion2yalanskiy-netizen/axiomvoid-vault"
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+
 # Репозитории для каждого vault'а
 # ВАЖНО: каждый vault → свой repo, иначе бот создаёт папки в чужом vault'е!
 VAULT_REPOS = {
@@ -418,6 +422,261 @@ def verify_task(path: str, expected_tool: str, expected_title: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# ─── CRM: хелперы ─────────────────────────────────────────────────────────────
+
+def create_client_file(name: str, email: str, project_type: str, budget: str) -> bool:
+    """Создаёт файл клиента из шаблона в axiomvoid-vault."""
+    date_str  = datetime.now().strftime("%Y-%m-%d")
+    safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', name, flags=re.UNICODE)[:60].strip()
+    content = f"""---
+tags: [клиент, crm]
+status: lead
+created: {date_str}
+---
+
+# {name}
+
+## Связи
+- [[Dashboard]]
+- [[CRM-Обзор]]
+
+## Контакты
+- Email: {email}
+- Телефон:
+- Instagram:
+- Город:
+
+## Проект
+- Тип: {project_type}
+- Бюджет: {budget}
+- Дедлайн:
+- Статус: lead
+
+## История общения
+- {date_str}: добавлен через Telegram бот
+
+## Файлы
+- Бриф:
+- Договор:
+- Инвойс:
+
+## Заметки
+
+"""
+    return github_create_file(AXIOMVOID_REPO, f"Клиенты/{safe_name}.md",
+                               content, f"crm: новый клиент {safe_name}")
+
+
+def update_crm_overview(name: str, status: str = "lead", budget: str = "—") -> bool:
+    """Добавляет строку клиента в CRM-Обзор.md через GitHub API."""
+    raw = github_get_file_content("Клиенты/CRM-Обзор.md", repo=AXIOMVOID_REPO)
+    if not raw:
+        return False
+
+    safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', name, flags=re.UNICODE)[:60].strip()
+    date_str  = datetime.now().strftime("%Y-%m-%d")
+    new_row   = f"| [[{safe_name}]] | {status} | {budget} | — |"
+
+    # Вставляем строку перед первой пустой строкой после разделителя таблицы
+    lines, result = raw.split("\n"), []
+    in_active, in_table, inserted = False, False, False
+    for line in lines:
+        if "## Активные клиенты" in line:
+            in_active = True
+        if in_active and line.startswith("|---"):
+            in_table = True
+        if in_active and in_table and not line.startswith("|") and not inserted:
+            result.append(new_row)
+            inserted, in_active, in_table = True, False, False
+        result.append(line)
+
+    new_content = "\n".join(result)
+
+    # Добавляем в раздел «Все клиенты»
+    if "## Все клиенты" in new_content:
+        new_content = new_content.rstrip() + f"\n- [[{safe_name}]] — {status}, -, {budget}\n"
+
+    new_content = re.sub(r'updated: \d{4}-\d{2}-\d{2}', f'updated: {date_str}', new_content)
+    return github_create_file(AXIOMVOID_REPO, "Клиенты/CRM-Обзор.md",
+                               new_content, f"crm: добавлен {safe_name}")
+
+
+def create_stripe_payment(client_name: str, amount_usd: float, description: str) -> dict:
+    """Создаёт Stripe Checkout Session. Возвращает {url, id} или {error}."""
+    if not STRIPE_SECRET_KEY:
+        return {"error": "STRIPE_SECRET_KEY не задан — добавь в Railway Variables"}
+    try:
+        resp = requests.post(
+            "https://api.stripe.com/v1/checkout/sessions",
+            auth=(STRIPE_SECRET_KEY, ""),
+            data={
+                "payment_method_types[]": "card",
+                "line_items[0][price_data][currency]": "usd",
+                "line_items[0][price_data][product_data][name]": description[:500],
+                "line_items[0][price_data][unit_amount]": str(int(amount_usd * 100)),
+                "line_items[0][quantity]": "1",
+                "mode": "payment",
+                "success_url": "https://t.me/axiomvoidbot",
+                "cancel_url": "https://t.me/axiomvoidbot",
+                "metadata[client]": client_name[:500],
+            },
+            timeout=30,
+        )
+        data = resp.json()
+        if resp.status_code == 200:
+            return {"url": data["url"], "id": data["id"]}
+        return {"error": data.get("error", {}).get("message", f"HTTP {resp.status_code}")}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def record_invoice_in_client_file(client_name: str, amount_usd: float,
+                                   description: str, payment_url: str, session_id: str) -> bool:
+    """Дописывает инвойс в файл клиента в axiomvoid-vault."""
+    safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', client_name, flags=re.UNICODE)[:60].strip()
+    path      = f"Клиенты/{safe_name}.md"
+    raw       = github_get_file_content(path, repo=AXIOMVOID_REPO)
+    if not raw:
+        return False
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    block = (
+        f"\n## Инвойс {date_str}\n"
+        f"- Сумма: ${amount_usd:.0f}\n"
+        f"- Услуга: {description}\n"
+        f"- Ссылка: {payment_url}\n"
+        f"- Stripe ID: {session_id}\n"
+    )
+    return github_create_file(AXIOMVOID_REPO, path,
+                               raw.rstrip() + "\n" + block,
+                               f"invoice: {safe_name} ${amount_usd:.0f}")
+
+
+# ─── CRM: обработчики шагов /newclient ────────────────────────────────────────
+
+def _nc_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🌐 Сайт",     callback_data=f"nc_type:{user_id}:сайт"),
+            InlineKeyboardButton("🔄 Редизайн", callback_data=f"nc_type:{user_id}:редизайн"),
+        ],
+        [
+            InlineKeyboardButton("📄 Лендинг",  callback_data=f"nc_type:{user_id}:лендинг"),
+            InlineKeyboardButton("📦 Другое",   callback_data=f"nc_type:{user_id}:другое"),
+        ],
+    ])
+
+
+async def _nc_handle_name(message, text: str, user_id: int, session: dict):
+    user_sessions[user_id] = {**session, "state": "nc_email", "nc_name": text}
+    await message.reply_text(
+        f"✅ Имя: *{text}*\n\nШаг 2/4: Email клиента:",
+        parse_mode="Markdown"
+    )
+
+
+async def _nc_handle_email(message, text: str, user_id: int, session: dict):
+    user_sessions[user_id] = {**session, "state": "nc_type", "nc_email": text}
+    await message.reply_text(
+        f"✅ Email: *{text}*\n\nШаг 3/4: Тип проекта:",
+        parse_mode="Markdown",
+        reply_markup=_nc_type_keyboard(user_id)
+    )
+
+
+async def _nc_set_type(message, project_type: str, user_id: int, session: dict):
+    user_sessions[user_id] = {**session, "state": "nc_budget", "nc_type": project_type}
+    await message.reply_text(
+        f"✅ Тип: *{project_type}*\n\nШаг 4/4: Бюджет (например: $1,500 или $3,000–5,000):",
+        parse_mode="Markdown"
+    )
+
+
+async def _nc_handle_budget(message, text: str, user_id: int, session: dict):
+    progress = await message.reply_text("⏳ Создаю клиента в CRM...")
+    name         = session.get("nc_name", "")
+    email        = session.get("nc_email", "")
+    project_type = session.get("nc_type", "")
+    budget       = text
+
+    loop     = asyncio.get_running_loop()
+    ok_file  = await loop.run_in_executor(None, create_client_file, name, email, project_type, budget)
+    ok_crm   = await loop.run_in_executor(None, update_crm_overview, name, "lead", budget)
+    user_sessions.pop(user_id, None)
+
+    if ok_file:
+        safe = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', name, flags=re.UNICODE)[:60].strip()
+        status_crm = "✅ обновлён" if ok_crm else "⚠️ не обновился (запусти crm-sync.sh)"
+        await progress.edit_text(
+            f"✅ *Клиент {name} добавлен в CRM!*\n\n"
+            f"👤 Имя: {name}\n📧 Email: {email}\n"
+            f"🏗 Проект: {project_type}\n💰 Бюджет: {budget}\n\n"
+            f"📁 `Клиенты/{safe}.md`\n📊 CRM-Обзор: {status_crm}",
+            parse_mode="Markdown"
+        )
+    else:
+        await progress.edit_text("❌ Ошибка создания файла клиента. Проверь GITHUB_TOKEN.")
+
+
+# ─── Invoice: обработчики шагов /invoice ──────────────────────────────────────
+
+async def _inv_handle_client(message, text: str, user_id: int, session: dict):
+    user_sessions[user_id] = {**session, "state": "inv_amount", "inv_client": text}
+    await message.reply_text(
+        f"✅ Клиент: *{text}*\n\nШаг 2/3: Сумма в USD (только цифра, например: 1500):",
+        parse_mode="Markdown"
+    )
+
+
+async def _inv_handle_amount(message, text: str, user_id: int, session: dict):
+    # Извлекаем число из строки
+    digits = re.sub(r'[^\d.]', '', text)
+    try:
+        amount = float(digits)
+    except ValueError:
+        await message.reply_text("⚠️ Введи сумму числом, например: `1500` или `2,500`", parse_mode="Markdown")
+        return
+    user_sessions[user_id] = {**session, "state": "inv_desc", "inv_amount": amount}
+    await message.reply_text(
+        f"✅ Сумма: *${amount:,.0f}*\n\nШаг 3/3: Описание услуги (будет в инвойсе):",
+        parse_mode="Markdown"
+    )
+
+
+async def _inv_handle_desc(message, text: str, user_id: int, session: dict):
+    progress    = await message.reply_text("⏳ Создаю Stripe инвойс...")
+    client_name = session.get("inv_client", "")
+    amount_usd  = session.get("inv_amount", 0.0)
+    description = text
+
+    loop   = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, create_stripe_payment, client_name, amount_usd, description)
+
+    if "error" in result:
+        await progress.edit_text(f"❌ Ошибка Stripe: {result['error']}")
+        user_sessions.pop(user_id, None)
+        return
+
+    pay_url    = result["url"]
+    session_id = result["id"]
+
+    # Записываем инвойс в файл клиента
+    ok_obs = await loop.run_in_executor(
+        None, record_invoice_in_client_file, client_name, amount_usd, description, pay_url, session_id
+    )
+    user_sessions.pop(user_id, None)
+
+    obs_status = "✅ записан в Obsidian" if ok_obs else "⚠️ файл клиента не найден в CRM"
+    await progress.edit_text(
+        f"💳 *Инвойс создан!*\n\n"
+        f"👤 Клиент: {client_name}\n"
+        f"💰 Сумма: ${amount_usd:,.0f}\n"
+        f"📝 Услуга: {description}\n\n"
+        f"🔗 *Ссылка на оплату:*\n{pay_url}\n\n"
+        f"📄 Obsidian: {obs_status}",
+        parse_mode="Markdown"
+    )
+
+
 # ─── Команды ─────────────────────────────────────────────────────────────────
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -513,6 +772,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Режим смены папки ──
     if session.get("state") == "note_editing_folder":
         await _handle_note_folder_edit(message, text, user_id, session)
+        return
+
+    # ── CRM: /newclient шаги ──
+    if session.get("state") == "nc_name":
+        await _nc_handle_name(message, text, user_id, session)
+        return
+    if session.get("state") == "nc_email":
+        await _nc_handle_email(message, text, user_id, session)
+        return
+    if session.get("state") == "nc_type":
+        await _nc_set_type(message, text, user_id, session)
+        return
+    if session.get("state") == "nc_budget":
+        await _nc_handle_budget(message, text, user_id, session)
+        return
+
+    # ── Invoice: /invoice шаги ──
+    if session.get("state") == "inv_client":
+        await _inv_handle_client(message, text, user_id, session)
+        return
+    if session.get("state") == "inv_amount":
+        await _inv_handle_amount(message, text, user_id, session)
+        return
+    if session.get("state") == "inv_desc":
+        await _inv_handle_desc(message, text, user_id, session)
         return
 
     # ── Instagram ссылка → режим Reels ──
@@ -1030,6 +1314,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data    = query.data or ""
 
+    # ── CRM: выбор типа проекта ──────────────────────────────────────────────
+    if data.startswith("nc_type:"):
+        parts_nc = data.split(":", 2)
+        uid_nc   = int(parts_nc[1]) if len(parts_nc) > 1 else update.effective_user.id
+        nc_type  = parts_nc[2] if len(parts_nc) > 2 else "другое"
+        session_nc = user_sessions.get(uid_nc, {})
+        if session_nc.get("state") == "nc_type":
+            await query.edit_message_reply_markup(None)
+            await _nc_set_type(query.message, nc_type, uid_nc, session_nc)
+        return
+
     # ── Worker: Отмена / Одобрение инструментов ───────────────────────────────
     if data.startswith("worker_"):
         await _handle_worker_callback(query, data)
@@ -1509,6 +1804,35 @@ async def handle_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def handle_newclient(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/newclient — пошаговое добавление нового клиента в CRM."""
+    user_id = update.effective_user.id
+    user_sessions[user_id] = {"state": "nc_name"}
+    await update.message.reply_text(
+        "➕ *Новый клиент в CRM*\n\n"
+        "Шаг 1/4: Введи имя клиента или компании:",
+        parse_mode="Markdown"
+    )
+
+
+async def handle_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/invoice — создать Stripe инвойс и отправить ссылку на оплату."""
+    user_id = update.effective_user.id
+    if not STRIPE_SECRET_KEY:
+        await update.message.reply_text(
+            "⚠️ *STRIPE_SECRET_KEY не настроен*\n\n"
+            "Добавь переменную в Railway → Variables:\n`STRIPE_SECRET_KEY=sk_live_...`",
+            parse_mode="Markdown"
+        )
+        return
+    user_sessions[user_id] = {"state": "inv_client"}
+    await update.message.reply_text(
+        "💳 *Создать Stripe инвойс*\n\n"
+        "Шаг 1/3: Введи имя клиента (должен быть в CRM):",
+        parse_mode="Markdown"
+    )
+
+
 async def handle_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/задача [текст] — показывает выбор агента для выполнения задачи."""
     text = " ".join(context.args).strip() if context.args else ""
@@ -1683,16 +2007,18 @@ def _save_chat_id_to_railway(chat_id: int) -> bool:
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_error_handler(handle_error)
-    app.add_handler(CommandHandler("start",   handle_start))
-    app.add_handler(CommandHandler("menu",    handle_start))
-    app.add_handler(CommandHandler("help",    handle_help))
-    app.add_handler(CommandHandler("myid",    handle_myid))
-    app.add_handler(CommandHandler("test",    handle_test))
-    app.add_handler(CommandHandler("reports", handle_reports))
-    app.add_handler(CommandHandler("task",    handle_task_command))
-    app.add_handler(CommandHandler("agents",  handle_agents_info))
-    app.add_handler(CommandHandler("chat",    handle_chat_command))
-    app.add_handler(CommandHandler("status",  handle_status))
+    app.add_handler(CommandHandler("start",     handle_start))
+    app.add_handler(CommandHandler("menu",      handle_start))
+    app.add_handler(CommandHandler("help",      handle_help))
+    app.add_handler(CommandHandler("myid",      handle_myid))
+    app.add_handler(CommandHandler("test",      handle_test))
+    app.add_handler(CommandHandler("reports",   handle_reports))
+    app.add_handler(CommandHandler("task",      handle_task_command))
+    app.add_handler(CommandHandler("agents",    handle_agents_info))
+    app.add_handler(CommandHandler("chat",      handle_chat_command))
+    app.add_handler(CommandHandler("status",    handle_status))
+    app.add_handler(CommandHandler("newclient", handle_newclient))
+    app.add_handler(CommandHandler("invoice",   handle_invoice))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
