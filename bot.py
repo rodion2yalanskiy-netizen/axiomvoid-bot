@@ -142,6 +142,29 @@ SYSTEM_PROMPT_CHAT = (
     "Диалог ведётся через Telegram."
 )
 
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+def safe_md_truncate(text: str, limit: int = 4000) -> str:
+    """Truncate to limit chars without leaving unclosed Telegram Markdown markers."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 5]
+    last_space = cut.rfind(' ')
+    if last_space > len(cut) // 2:
+        cut = cut[:last_space]
+    cut += "…"
+    # Close triple-backtick code blocks before single backticks
+    if cut.count('```') % 2 == 1:
+        cut += '\n```'
+    single_bt = cut.count('`') - 3 * cut.count('```')
+    if single_bt % 2 == 1:
+        cut += '`'
+    if cut.count('*') % 2 == 1:
+        cut += '*'
+    if cut.count('_') % 2 == 1:
+        cut += '_'
+    return cut
+
+
 # ─── Агенты ──────────────────────────────────────────────────────────────────
 AGENTS = {
     "code": {
@@ -1163,7 +1186,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             history.append(user_msg)
             history.append({"role": "assistant", "content": answer})
             user_sessions[user_id]["history"] = history
-            await progress.edit_text(answer[:4000])
+            await progress.edit_text(safe_md_truncate(answer, 4000))
         else:
             # Вне чата — разовый анализ
             answer, _ = await loop.run_in_executor(
@@ -1179,7 +1202,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "type":   "note",
             }
             await progress.edit_text(
-                f"📷 *Анализ фото:*\n\n{answer[:3500]}",
+                f"📷 *Анализ фото:*\n\n{safe_md_truncate(answer, 3500)}",
                 parse_mode="Markdown",
                 reply_markup=note_keyboard(user_id)
             )
@@ -1235,7 +1258,7 @@ async def _handle_claude_chat(message, text: str, user_id: int, session: dict):
 
         msg_count = len([m for m in history if m["role"] == "user"])
         await progress.edit_text(
-            f"{answer[:3900]}\n\n_Сообщение {msg_count} · /стоп чтобы завершить_",
+            f"{safe_md_truncate(answer, 3900)}\n\n_Сообщение {msg_count} · /стоп чтобы завершить_",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -1534,7 +1557,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = report["name"].replace("Отчёт - ", "").replace("Отчёт: ", "").replace(".md", "")
         out = f"📋 *{name}*\n\n{body}"
         if len(out) > 4000:
-            out = out[:3950] + "\n\n_...обрезано — смотри полный отчёт в Obsidian_"
+            out = safe_md_truncate(out, 3950) + "\n\n_...обрезано — смотри полный отчёт в Obsidian_"
         try:
             await query.message.reply_text(out, parse_mode="Markdown")
         except Exception:
