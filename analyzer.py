@@ -17,22 +17,23 @@ import os
 import re
 import json
 import asyncio
+import logging
 import subprocess
 import requests
 from datetime import datetime
 from groq import Groq
 
+_log = logging.getLogger(__name__)
+
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY") or ""
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY") or ""
 
 if not GROQ_API_KEY:
-    import logging as _log
     _log.warning("GROQ_API_KEY не задан — транскрипция голоса недоступна")
 if not OPENROUTER_API_KEY:
-    import logging as _log  # noqa: F811
     _log.warning("OPENROUTER_API_KEY не задан — анализ через OpenRouter недоступен")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 OR_URL     = "https://openrouter.ai/api/v1/chat/completions"
 OR_HEADERS = {
@@ -79,6 +80,9 @@ def transcribe(audio_path: str) -> str:
         ".flac": "audio/flac",
     }
     mime = MIME_TYPES.get(ext, "audio/ogg")
+
+    if groq_client is None:
+        raise RuntimeError("GROQ_API_KEY не задан — транскрипция недоступна")
 
     # Пробуем large-v3, при ошибке (лимит/quota) — fallback на turbo (быстрее, чуть дешевле)
     for whisper_model in ("whisper-large-v3", "whisper-large-v3-turbo"):

@@ -2049,6 +2049,10 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    if not os.environ.get("GROQ_API_KEY"):
+        logger.warning("GROQ_API_KEY не задан — транскрипция голоса недоступна")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        logger.warning("OPENROUTER_API_KEY не задан — анализ через OpenRouter недоступен")
     logger.info("🤖 Axiom:Void Bot запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
