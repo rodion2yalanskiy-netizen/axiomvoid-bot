@@ -1027,6 +1027,13 @@ async def _handle_note_text_edit(message, text: str, user_id: int, session: dict
 # ─── Reels pipeline ──────────────────────────────────────────────────────────
 
 async def _process_reel(message, url: str, user_id: int):
+    if not os.environ.get("GROQ_API_KEY"):
+        await message.reply_text(
+            "⚠️ Транскрипция Reels недоступна: GROQ\\_API\\_KEY не задан.",
+            parse_mode="Markdown"
+        )
+        logger.warning("_process_reel: GROQ_API_KEY не задан, запрос отклонён")
+        return
     progress = await message.reply_text("⬇️ Скачиваю Reel...")
     try:
         loop = asyncio.get_running_loop()
@@ -1107,6 +1114,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user_id = update.effective_user.id
     voice   = message.voice or message.audio
+
+    if not os.environ.get("GROQ_API_KEY"):
+        await message.reply_text(
+            "⚠️ Транскрипция голоса недоступна: GROQ\\_API\\_KEY не задан.",
+            parse_mode="Markdown"
+        )
+        logger.warning("handle_voice: GROQ_API_KEY не задан, запрос отклонён")
+        return
 
     progress = await message.reply_text("🎤 Слушаю...")
     try:
@@ -1301,6 +1316,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not video:
         return
     user_id  = update.effective_user.id
+    if not os.environ.get("GROQ_API_KEY"):
+        await message.reply_text(
+            "⚠️ Транскрипция видео недоступна: GROQ\\_API\\_KEY не задан.",
+            parse_mode="Markdown"
+        )
+        logger.warning("handle_video: GROQ_API_KEY не задан, запрос отклонён")
+        return
     progress = await message.reply_text("⏳ Получаю видео...")
     try:
         loop = asyncio.get_running_loop()
