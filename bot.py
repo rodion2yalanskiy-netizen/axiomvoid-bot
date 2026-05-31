@@ -18,7 +18,8 @@ import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes
+    CallbackQueryHandler, filters, ContextTypes,
+    TypeHandler, ApplicationHandlerStop,
 )
 
 from analyzer import (
@@ -40,6 +41,9 @@ logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_CHAT_ID  = int(os.environ.get("ADMIN_CHAT_ID", "0") or "0")
+# Иммутабельная копия из env — единственный источник истины для авторизации.
+# Никогда не изменяется из входящих сообщений.
+_OWNER_ID: int = ADMIN_CHAT_ID
 RAILWAY_TOKEN  = os.environ.get("RAILWAY_API_TOKEN", "")
 RAILWAY_SVC_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
 RAILWAY_ENV_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
@@ -707,6 +711,16 @@ async def _inv_handle_desc(message, text: str, user_id: int, session: dict):
     )
 
 
+# ─── Авторизация — блокировка не-владельца ───────────────────────────────────
+
+async def _guard_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs in handler group -1 before all others.
+    Drops every update that doesn't come from _OWNER_ID.
+    Raises ApplicationHandlerStop so PTB skips remaining handlers."""
+    uid = update.effective_user.id if update.effective_user else None
+    if uid != _OWNER_ID:
+        raise ApplicationHandlerStop()
+
 # ─── Команды ─────────────────────────────────────────────────────────────────
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -748,13 +762,10 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global ADMIN_CHAT_ID
+    """Показывает caller его Telegram ID. Не изменяет ADMIN_CHAT_ID."""
     user_id = update.effective_user.id
-    ADMIN_CHAT_ID = user_id
-    logger.info(f"ADMIN_CHAT_ID={user_id}")
-    _save_chat_id_to_railway(user_id)
     await update.message.reply_text(
-        f"🆔 Твой Telegram ID: `{user_id}`\n✅ Уведомления о задачах настроены.",
+        f"🆔 Твой Telegram ID: `{user_id}`",
         parse_mode="Markdown"
     )
 
@@ -2059,6 +2070,8 @@ def _save_chat_id_to_railway(chat_id: int) -> bool:
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_error_handler(handle_error)
+    # Единый guard: блокирует все апдейты от не-владельца (group=-1 выполняется первым).
+    app.add_handler(TypeHandler(Update, _guard_owner), group=-1)
     app.add_handler(CommandHandler("start",     handle_start))
     app.add_handler(CommandHandler("menu",      handle_start))
     app.add_handler(CommandHandler("help",      handle_help))
