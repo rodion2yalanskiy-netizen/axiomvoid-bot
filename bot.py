@@ -37,12 +37,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_CHAT_ID  = int(os.environ.get("ADMIN_CHAT_ID", "0") or "0")
 RAILWAY_TOKEN  = os.environ.get("RAILWAY_API_TOKEN", "")
 RAILWAY_SVC_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
 RAILWAY_ENV_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+
+# Fail-fast: без этих переменных бот не может работать
+_missing = [name for name, val in [("TELEGRAM_TOKEN", TELEGRAM_TOKEN), ("ADMIN_CHAT_ID", ADMIN_CHAT_ID)] if not val]
+if _missing:
+    raise RuntimeError(f"Обязательные переменные окружения не заданы: {', '.join(_missing)} — добавь в Railway → Variables")
 
 # CRM / Stripe
 AXIOMVOID_REPO    = "rodion2yalanskiy-netizen/axiomvoid-vau"
