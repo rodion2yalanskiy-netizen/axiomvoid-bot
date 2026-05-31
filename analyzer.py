@@ -23,7 +23,14 @@ from datetime import datetime
 from groq import Groq
 
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY") or ""
-OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY") or ""
+
+if not GROQ_API_KEY:
+    import logging as _log
+    _log.warning("GROQ_API_KEY не задан — транскрипция голоса недоступна")
+if not OPENROUTER_API_KEY:
+    import logging as _log  # noqa: F811
+    _log.warning("OPENROUTER_API_KEY не задан — анализ через OpenRouter недоступен")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 

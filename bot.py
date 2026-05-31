@@ -45,7 +45,7 @@ RAILWAY_SVC_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
 RAILWAY_ENV_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
 
 # CRM / Stripe
-AXIOMVOID_REPO    = "rodion2yalanskiy-netizen/axiomvoid-vault"
+AXIOMVOID_REPO    = "rodion2yalanskiy-netizen/axiomvoid-vau"
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # Репозитории для каждого vault'а
@@ -74,9 +74,12 @@ SESSION_FILE = Path(os.environ.get("SESSION_FILE_PATH", "/tmp/bot_sessions.json"
 
 def _persist(data: dict):
     try:
-        SESSION_FILE.write_text(json.dumps(
+        import tempfile
+        tmp = SESSION_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(
             {str(k): v for k, v in data.items()}, ensure_ascii=False
         ))
+        os.replace(tmp, SESSION_FILE)
     except Exception:
         pass
 
