@@ -54,17 +54,17 @@ if _missing:
     raise RuntimeError(f"Обязательные переменные окружения не заданы: {', '.join(_missing)} — добавь в Railway → Variables")
 
 # CRM / Stripe
-AXIOMVOID_REPO    = "rodion2yalanskiy-netizen/axiomvoid-vau"
+AXIOMVOID_REPO    = "rodion2yalanskiy-netizen/axiomvoid-vault"
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # Репозитории для каждого vault'а
 # ВАЖНО: каждый vault → свой repo, иначе бот создаёт папки в чужом vault'е!
 VAULT_REPOS = {
-    "Бизнес QSNera": "rodion2yalanskiy-netizen/qsnera-vault",
+    "Бизнес QSNera": "rodion2yalanskiy-netizen/axiomvoid-vault",
     "Цифровой мозг": "rodion2yalanskiy-netizen/digital-brain-vault",
     "Личная жизнь":  "rodion2yalanskiy-netizen/digital-brain-vault",  # нет отдельного repo, Brain как хаб
 }
-DEFAULT_REPO = "rodion2yalanskiy-netizen/qsnera-vault"
+DEFAULT_REPO = "rodion2yalanskiy-netizen/axiomvoid-vault"
 
 # Отображаемые имена vault'ов в UI (роутинг-ключи не меняем!)
 VAULT_DISPLAY = {
@@ -300,7 +300,7 @@ def save_note_to_obsidian(vault: str, folder: str, title: str, content: str) -> 
     import re as _re
 
     # Разрешённые папки — только реально существующие в каждом репозитории!
-    # qsnera-vault (Бизнес QSNera): Клиенты, Задачи, Отчёты, Маркетинг, Сайт
+    # axiomvoid-vault (Бизнес QSNera/AxiomVoid): Клиенты, Задачи, Отчёты, Маркетинг, Сайт
     # digital-brain-vault (Цифровой мозг + Личная жизнь): Brain, Система, Саморазвитие, Работа над собой
     ALLOWED_FOLDERS = {
         "Бизнес QSNera": ["Клиенты", "Задачи", "Отчёты", "Маркетинг", "Сайт"],
