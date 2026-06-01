@@ -12,4 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Порт для Stripe webhook (Railway роутит HTTP через PORT env variable)
+EXPOSE 8080
+
 CMD ["python", "bot.py"]
