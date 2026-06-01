@@ -60,7 +60,8 @@ if _missing:
 
 # CRM / Stripe
 AXIOMVOID_REPO    = "rodion2yalanskiy-netizen/axiomvoid-vault"
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_SECRET_KEY  = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_RETURN_URL  = os.environ.get("STRIPE_RETURN_URL", "").rstrip("/")
 
 # Репозитории для каждого vault'а
 # ВАЖНО: каждый vault → свой repo, иначе бот создаёт папки в чужом vault'е!
@@ -445,7 +446,11 @@ def github_get_file_content(path: str, repo: str = DEFAULT_REPO) -> str:
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
     try:
         resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 404:
+            logger.warning(f"github_get_file_content: NOT FOUND repo={repo} path={path!r}")
+            return ""
         if resp.status_code != 200:
+            logger.warning(f"github_get_file_content: HTTP {resp.status_code} repo={repo} path={path!r}")
             return ""
         raw_content = resp.json().get("content", "")
         return base64.b64decode(raw_content).decode("utf-8")
@@ -606,6 +611,8 @@ def create_stripe_payment(client_name: str, amount_usd: float, description: str)
     """Создаёт Stripe Checkout Session. Возвращает {url, id} или {error}."""
     if not STRIPE_SECRET_KEY:
         return {"error": "STRIPE_SECRET_KEY не задан — добавь в Railway Variables"}
+    if not STRIPE_RETURN_URL:
+        return {"error": "STRIPE_RETURN_URL не задан в Railway Variables"}
     try:
         resp = requests.post(
             "https://api.stripe.com/v1/checkout/sessions",
@@ -617,8 +624,8 @@ def create_stripe_payment(client_name: str, amount_usd: float, description: str)
                 "line_items[0][price_data][unit_amount]": str(int(amount_usd * 100)),
                 "line_items[0][quantity]": "1",
                 "mode": "payment",
-                "success_url": "https://t.me/axiomvoidbot",
-                "cancel_url": "https://t.me/axiomvoidbot",
+                "success_url": f"{STRIPE_RETURN_URL}/payment-success?session_id={{CHECKOUT_SESSION_ID}}",
+                "cancel_url":  f"{STRIPE_RETURN_URL}/payment-cancel",
                 "metadata[client]": client_name[:500],
             },
             timeout=30,
@@ -2250,6 +2257,14 @@ async def handle_stripe_webhook(request: _aio_web.Request) -> _aio_web.Response:
     return _aio_web.Response(status=200, text="OK")
 
 
+async def handle_payment_success(request: _aio_web.Request) -> _aio_web.Response:
+    raise _aio_web.HTTPFound("https://t.me/axiomvoidbot")
+
+
+async def handle_payment_cancel(request: _aio_web.Request) -> _aio_web.Response:
+    raise _aio_web.HTTPFound("https://t.me/axiomvoidbot")
+
+
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
 async def _main_async() -> None:
@@ -2284,7 +2299,9 @@ async def _main_async() -> None:
 
     # ── aiohttp Stripe webhook сервер ──────────────────────────────────────────
     webhook_web = _aio_web.Application()
-    webhook_web.router.add_post("/stripe-webhook", handle_stripe_webhook)
+    webhook_web.router.add_post("/stripe-webhook",    handle_stripe_webhook)
+    webhook_web.router.add_get("/payment-success",    handle_payment_success)
+    webhook_web.router.add_get("/payment-cancel",     handle_payment_cancel)
     runner = _aio_web.AppRunner(webhook_web)
     await runner.setup()
     await _aio_web.TCPSite(runner, "0.0.0.0", PORT).start()
