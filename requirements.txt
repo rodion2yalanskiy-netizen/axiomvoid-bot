@@ -3,3 +3,5 @@ groq==0.11.0
 requests==2.31.0
 yt-dlp>=2024.12.0
 instaloader>=4.13
+aiohttp>=3.9.0
+stripe>=7.0.0

@@ -10,11 +10,13 @@ Obsidian структура (СУЩЕСТВУЮЩИЕ папки, без emoji!)
   Личная жизнь:   Brain/ | Саморазвитие/ | Работа над собой/
 """
 
-import os, re, logging, asyncio, base64, tempfile, subprocess, json, time, threading
+import os, re, logging, asyncio, base64, tempfile, subprocess, json, time, threading, signal
 from datetime import datetime
 from pathlib import Path
 
 import requests
+import stripe as _stripe
+from aiohttp import web as _aio_web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -46,8 +48,10 @@ ADMIN_CHAT_ID  = int(os.environ.get("ADMIN_CHAT_ID", "0") or "0")
 _OWNER_ID: int = ADMIN_CHAT_ID
 RAILWAY_TOKEN  = os.environ.get("RAILWAY_API_TOKEN", "")
 RAILWAY_SVC_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
-RAILWAY_ENV_ID  = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
-SESSION_GIST_ID = os.environ.get("SESSION_GIST_ID", "")  # unlisted private Gist for session persistence
+RAILWAY_ENV_ID       = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+SESSION_GIST_ID      = os.environ.get("SESSION_GIST_ID", "")       # unlisted private Gist for session persistence
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "") # whsec_... set in Railway Variables
+PORT                 = int(os.environ.get("PORT", "8080"))
 
 # Fail-fast: без этих переменных бот не может работать
 _missing = [name for name, val in [("TELEGRAM_TOKEN", TELEGRAM_TOKEN), ("ADMIN_CHAT_ID", ADMIN_CHAT_ID)] if not val]
@@ -2127,12 +2131,134 @@ def _save_chat_id_to_railway(chat_id: int) -> bool:
         return False
 
 
+# ─── Stripe webhook ───────────────────────────────────────────────────────────
+
+async def _notify_owner(text: str) -> None:
+    """Отправляет уведомление владельцу в Telegram (не блокирует event loop)."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={"chat_id": _OWNER_ID, "text": text, "parse_mode": "Markdown"},
+        timeout=10,
+    ))
+
+
+def _update_client_paid(client_name: str, amount_usd: float) -> None:
+    """Обновляет статус клиента на 'оплачено' в его карточке.
+    Безопасно: ничего не делает если файл не найден или уже обновлён."""
+    try:
+        safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', client_name, flags=re.UNICODE)[:60].strip()
+        if not safe_name:
+            return
+        path = f"Клиенты/{safe_name}.md"
+        raw  = github_get_file_content(path, repo=AXIOMVOID_REPO)
+        if not raw:
+            logger.warning(f"Stripe paid: карточка не найдена → {safe_name!r}")
+            return
+        updated = re.sub(r'^(status:)\s*\S+', r'\1 оплачено', raw, flags=re.MULTILINE)
+        updated = re.sub(r'^(\s*- Статус:)\s*.+$', r'\1 оплачено', updated, flags=re.MULTILINE)
+        if updated == raw:
+            return  # уже актуально
+        github_create_file(AXIOMVOID_REPO, path, updated,
+                           f"crm: оплачено — {safe_name} ${amount_usd:.0f} [skip ci]")
+        logger.info(f"Stripe paid: статус обновлён → {safe_name}")
+    except Exception as e:
+        logger.warning(f"_update_client_paid error: {e}")
+
+
+async def _process_stripe_event(event: dict) -> None:
+    """Обрабатывает верифицированное Stripe-событие: уведомление + действие."""
+    etype = event.get("type", "")
+    obj   = event.get("data", {}).get("object", {})
+
+    if etype == "checkout.session.completed":
+        client   = (obj.get("metadata") or {}).get("client", "Неизвестный клиент")
+        amount   = (obj.get("amount_total") or 0) / 100
+        currency = (obj.get("currency") or "usd").upper()
+        sess_id  = obj.get("id", "")[:24]
+        await _notify_owner(
+            f"✅ *Оплата прошла!*\n\n"
+            f"👤 Клиент: {client}\n"
+            f"💰 Сумма: ${amount:,.2f} {currency}\n"
+            f"🔑 `{sess_id}…`"
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _update_client_paid, client, amount)
+
+    elif etype == "payment_intent.payment_failed":
+        amount  = (obj.get("amount") or 0) / 100
+        err     = (obj.get("last_payment_error") or {}).get("message", "неизвестно")
+        client  = (obj.get("metadata") or {}).get("client", "?")
+        await _notify_owner(
+            f"❌ *Платёж не прошёл*\n\n"
+            f"👤 Клиент: {client}\n"
+            f"💰 Сумма: ${amount:,.2f}\n"
+            f"📋 Причина: {err}"
+        )
+
+    elif etype == "charge.dispute.created":
+        amount   = (obj.get("amount") or 0) / 100
+        currency = (obj.get("currency") or "usd").upper()
+        reason   = obj.get("reason", "?")
+        await _notify_owner(
+            f"🚨 *CHARGEBACK — ДЕЙСТВУЙ НЕМЕДЛЕННО!*\n\n"
+            f"💰 ${amount:,.2f} {currency}\n"
+            f"📋 Причина: {reason}\n\n"
+            f"⏰ *Окно для оспаривания ограничено!*\n"
+            f"👉 https://dashboard.stripe.com/disputes"
+        )
+
+    elif etype == "charge.refunded":
+        amount   = (obj.get("amount_refunded") or 0) / 100
+        currency = (obj.get("currency") or "usd").upper()
+        client   = (obj.get("metadata") or {}).get("client", "?")
+        await _notify_owner(
+            f"💰 *Возврат*\n\n"
+            f"👤 Клиент: {client}\n"
+            f"💰 Возвращено: ${amount:,.2f} {currency}"
+        )
+
+    else:
+        logger.debug(f"Stripe event ignored: {etype}")
+
+
+async def handle_stripe_webhook(request: _aio_web.Request) -> _aio_web.Response:
+    """POST /stripe-webhook — принимает и верифицирует события от Stripe.
+    Полностью изолирован от Telegram guard (_guard_owner действует только на Update-объекты PTB).
+    Если STRIPE_WEBHOOK_SECRET не задан — возвращает 400 на всё (безопасно, бот работает)."""
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.warning("Stripe webhook: STRIPE_WEBHOOK_SECRET не задан → 400")
+        return _aio_web.Response(status=400, text="Webhook secret not configured")
+
+    payload    = await request.read()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        event = _stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except _stripe.error.SignatureVerificationError:
+        logger.warning("Stripe webhook: невалидная подпись → 400")
+        return _aio_web.Response(status=400, text="Invalid signature")
+    except Exception as e:
+        logger.error(f"Stripe webhook construct_event error: {e}")
+        return _aio_web.Response(status=400, text="Bad request")
+
+    try:
+        await _process_stripe_event(event)
+    except Exception as e:
+        logger.error(f"Stripe event processing error: {e}", exc_info=True)
+
+    return _aio_web.Response(status=200, text="OK")
+
+
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
-def main():
+async def _main_async() -> None:
+    """Async entry point: PTB polling + aiohttp Stripe webhook, один event loop."""
+    # ── PTB application — точно те же хэндлеры что были в run_polling ─────────
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_error_handler(handle_error)
     # Единый guard: блокирует все апдейты от не-владельца (group=-1 выполняется первым).
+    # Stripe webhook — HTTP-запрос к aiohttp, не Telegram Update, guard его НЕ касается.
     app.add_handler(TypeHandler(Update, _guard_owner), group=-1)
     app.add_handler(CommandHandler("start",     handle_start))
     app.add_handler(CommandHandler("menu",      handle_start))
@@ -2155,8 +2281,40 @@ def main():
         logger.warning("GROQ_API_KEY не задан — транскрипция голоса недоступна")
     if not os.environ.get("OPENROUTER_API_KEY"):
         logger.warning("OPENROUTER_API_KEY не задан — анализ через OpenRouter недоступен")
+
+    # ── aiohttp Stripe webhook сервер ──────────────────────────────────────────
+    webhook_web = _aio_web.Application()
+    webhook_web.router.add_post("/stripe-webhook", handle_stripe_webhook)
+    runner = _aio_web.AppRunner(webhook_web)
+    await runner.setup()
+    await _aio_web.TCPSite(runner, "0.0.0.0", PORT).start()
+    logger.info(f"🌐 Stripe webhook: 0.0.0.0:{PORT}/stripe-webhook")
+
+    # ── Graceful shutdown по SIGTERM/SIGINT ────────────────────────────────────
+    loop    = asyncio.get_running_loop()
+    _stop   = asyncio.Event()
+
+    def _on_exit(*_: object) -> None:
+        loop.call_soon_threadsafe(_stop.set)
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(_sig, _on_exit)
+
+    # ── Запуск PTB polling (async-форма, allowed_updates идентичны run_polling) ─
     logger.info("🤖 Axiom:Void Bot запущен!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await _stop.wait()            # блокируем до SIGTERM/SIGINT
+        await app.updater.stop()
+        await app.stop()
+
+    await runner.cleanup()
+
+
+def main() -> None:
+    asyncio.run(_main_async())
+
 
 if __name__ == "__main__":
     main()
