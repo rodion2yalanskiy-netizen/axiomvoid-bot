@@ -10,7 +10,7 @@ Obsidian структура (СУЩЕСТВУЮЩИЕ папки, без emoji!)
   Личная жизнь:   Brain/ | Саморазвитие/ | Работа над собой/
 """
 
-import os, re, logging, asyncio, base64, tempfile, subprocess, json, time
+import os, re, logging, asyncio, base64, tempfile, subprocess, json, time, threading
 from datetime import datetime
 from pathlib import Path
 
@@ -46,7 +46,8 @@ ADMIN_CHAT_ID  = int(os.environ.get("ADMIN_CHAT_ID", "0") or "0")
 _OWNER_ID: int = ADMIN_CHAT_ID
 RAILWAY_TOKEN  = os.environ.get("RAILWAY_API_TOKEN", "")
 RAILWAY_SVC_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
-RAILWAY_ENV_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+RAILWAY_ENV_ID  = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+SESSION_GIST_ID = os.environ.get("SESSION_GIST_ID", "")  # unlisted private Gist for session persistence
 
 # Fail-fast: без этих переменных бот не может работать
 _missing = [name for name, val in [("TELEGRAM_TOKEN", TELEGRAM_TOKEN), ("ADMIN_CHAT_ID", ADMIN_CHAT_ID)] if not val]
@@ -76,35 +77,96 @@ VAULT_DISPLAY = {
 # ─── Сессии с TTL и персистентностью ─────────────────────────────────────────
 # state: "reel_confirming" | "reel_editing" | "note_confirming" | "note_editing"
 #        "agent_selecting" | "note_editing_folder" | "claude_chat"
-SESSION_TTL  = 3600                              # 1 час — сессия живёт без активности
-SESSION_FILE = Path(os.environ.get("SESSION_FILE_PATH", "/tmp/bot_sessions.json"))
-# На Railway /tmp сбрасывается при деплое — задать SESSION_FILE_PATH в Variables
-# для сохранения сессий. Пример: SESSION_FILE_PATH=/app/sessions.json
+#
+# Хранение: /tmp (fallback в рамках контейнера) + GitHub Gist (переживает Railway redeploy).
+# SESSION_GIST_ID = unlisted приватный Gist, ID задаётся через Railway Variable.
+# Данные в Gist: wizard state + введённые поля (/invoice: клиент+сумма, /newclient: имя+email).
+# Чувствительные данные (ключи API, платёжные данные) в сессиях НИКОГДА не хранятся.
 
-def _persist(data: dict):
+SESSION_TTL   = 3600
+SESSION_FILE  = Path(os.environ.get("SESSION_FILE_PATH", "/tmp/bot_sessions.json"))
+_GIST_URL     = f"https://api.github.com/gists/{SESSION_GIST_ID}" if SESSION_GIST_ID else ""
+_GIST_HEADERS = lambda: {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+_GIST_LOCK    = threading.Lock()   # сериализует фоновые записи в Gist
+
+def _sessions_to_json(data: dict) -> str:
+    return json.dumps({str(k): v for k, v in data.items()}, ensure_ascii=False)
+
+def _parse_sessions(raw: dict) -> dict:
+    now = time.time()
+    return {int(k): v for k, v in raw.items()
+            if now - v.get("_ts", 0) < SESSION_TTL}
+
+# ── Gist: фоновая запись ──────────────────────────────────────────────────────
+
+def _gist_write_thread(data_str: str) -> None:
+    """Daemon thread: пишет сессии в Gist. Сбои игнорируются — бот не падает."""
+    if not _GIST_URL or not GITHUB_TOKEN:
+        return
+    with _GIST_LOCK:
+        try:
+            requests.patch(
+                _GIST_URL,
+                headers=_GIST_HEADERS(),
+                json={"files": {"bot_sessions.json": {"content": data_str}}},
+                timeout=15,
+            )
+        except Exception:
+            pass  # сетевой сбой — следующий шаг визарда повторит попытку
+
+def _gist_save(data: dict) -> None:
+    """Запускает фоновый поток записи в Gist (не блокирует event loop)."""
+    if not SESSION_GIST_ID:
+        return
+    t = threading.Thread(target=_gist_write_thread, args=(_sessions_to_json(data),), daemon=True)
+    t.start()
+
+# ── Gist: чтение при старте ───────────────────────────────────────────────────
+
+def _gist_load() -> dict:
+    """Читает сессии из Gist. Возвращает {} при любой ошибке — никогда не крашит."""
+    if not _GIST_URL or not GITHUB_TOKEN:
+        return {}
     try:
-        import tempfile
+        r = requests.get(_GIST_URL, headers=_GIST_HEADERS(), timeout=10)
+        if r.status_code != 200:
+            return {}
+        content = r.json()["files"]["bot_sessions.json"]["content"]
+        return _parse_sessions(json.loads(content))
+    except Exception:
+        return {}
+
+# ── Локальный /tmp: быстрый fallback внутри контейнера ───────────────────────
+
+def _persist(data: dict) -> None:
+    """Пишет в /tmp (мгновенно) и запускает фоновую запись в Gist."""
+    try:
         tmp = SESSION_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(
-            {str(k): v for k, v in data.items()}, ensure_ascii=False
-        ))
+        tmp.write_text(_sessions_to_json(data))
         os.replace(tmp, SESSION_FILE)
     except Exception:
         pass
+    _gist_save(data)
 
 def _load_sessions() -> dict:
+    """Загрузка при старте: Gist (переживает redeploy) → /tmp → {}."""
+    gh = _gist_load()
+    if gh:
+        logger.info(f"Sessions loaded from Gist: {len(gh)} active")
+        return gh
     try:
         if SESSION_FILE.exists():
             raw = json.loads(SESSION_FILE.read_text())
-            now = time.time()
-            return {int(k): v for k, v in raw.items()
-                    if now - v.get("_ts", 0) < SESSION_TTL}
+            result = _parse_sessions(raw)
+            if result:
+                logger.info(f"Sessions loaded from /tmp: {len(result)} active")
+                return result
     except Exception:
         pass
     return {}
 
 class SessionStore(dict):
-    """dict с автоматическим TTL и персистентностью."""
+    """dict с автоматическим TTL и персистентностью (Gist + /tmp)."""
 
     def __setitem__(self, key, value):
         if isinstance(value, dict):
@@ -128,12 +190,12 @@ class SessionStore(dict):
         return result
 
     def touch(self, key):
-        """Обновляет _ts и сохраняет (вызывать после прямого изменения dict внутри)."""
+        """Обновляет _ts и сохраняет."""
         if key in self:
             self[key]["_ts"] = time.time()
             _persist(self)
 
-# Загружаем при старте — сессии переживают crash/graceful restart
+# Загружаем при старте: Gist → /tmp → {}
 user_sessions: SessionStore = SessionStore(_load_sessions())
 
 # Кеш списка отчётов для inline-кнопок (user_id -> list of file dicts)
