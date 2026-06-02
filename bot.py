@@ -2331,8 +2331,9 @@ async def handle_stripe_webhook(request: _aio_web.Request) -> _aio_web.Response:
         logger.error(f"Stripe webhook construct_event error: {e}")
         return _aio_web.Response(status=400, text="Bad request")
 
+    import json as _json
     try:
-        await _process_stripe_event(event)
+        await _process_stripe_event(_json.loads(payload))
     except Exception as e:
         logger.error(f"Stripe event processing error: {e}", exc_info=True)
 
