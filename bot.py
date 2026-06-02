@@ -459,6 +459,89 @@ def github_get_file_content(path: str, repo: str = DEFAULT_REPO) -> str:
         return ""
 
 
+_CRM_SERVICE_FILES = {"crm-обзор.md", "_шаблон-клиента.md"}
+
+def github_list_files(folder: str, repo: str) -> list[str]:
+    """Возвращает имена файлов (не папок) в указанной папке репозитория."""
+    import urllib.parse
+    if not GITHUB_TOKEN:
+        return []
+    url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(folder)}"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            logger.warning(f"github_list_files: HTTP {resp.status_code} repo={repo} folder={folder!r}")
+            return []
+        return [item["name"] for item in resp.json() if item.get("type") == "file"]
+    except Exception as e:
+        logger.warning(f"github_list_files error: {e}")
+        return []
+
+
+def find_client_file(client_name: str) -> tuple[str, str] | None:
+    """Ищет файл клиента в Клиенты/ по трём уровням.
+
+    Уровень 1 — exact по safe_name.
+    Уровень 2 — case-insensitive exact.
+    Уровень 3 — все слова запроса входят в имя файла (регистронезависимо);
+                если совпадений > 1 — возвращает None (ambiguous, не угадывать).
+
+    Возвращает (path, content) или None.
+    Служебные файлы (CRM-Обзор.md, _шаблон-клиента.md и всё начинающееся с _ или CRM-)
+    исключаются из поиска.
+    """
+    safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', client_name, flags=re.UNICODE)[:60].strip()
+    if not safe_name:
+        return None
+
+    # Уровень 1 — exact
+    path = f"Клиенты/{safe_name}.md"
+    raw = github_get_file_content(path, repo=AXIOMVOID_REPO)
+    if raw:
+        return path, raw
+
+    # Список файлов нужен для уровней 2 и 3
+    all_files = github_list_files("Клиенты", repo=AXIOMVOID_REPO)
+    candidates = [
+        f for f in all_files
+        if not (f.startswith("_") or f.lower().startswith("crm-") or f.lower() in _CRM_SERVICE_FILES)
+        and f.endswith(".md")
+    ]
+
+    # Уровень 2 — case-insensitive exact
+    target_lower = f"{safe_name.lower()}.md"
+    for fname in candidates:
+        if fname.lower() == target_lower:
+            path = f"Клиенты/{fname}"
+            raw = github_get_file_content(path, repo=AXIOMVOID_REPO)
+            if raw:
+                return path, raw
+
+    # Уровень 3 — все слова запроса входят в имя файла
+    words = [w for w in safe_name.lower().split() if w]
+    if not words:
+        return None
+    matched = [
+        f for f in candidates
+        if all(w in f.lower() for w in words)
+    ]
+    if len(matched) == 1:
+        path = f"Клиенты/{matched[0]}"
+        raw = github_get_file_content(path, repo=AXIOMVOID_REPO)
+        if raw:
+            return path, raw
+    elif len(matched) > 1:
+        logger.warning(
+            f"find_client_file: ambiguous query={safe_name!r} "
+            f"candidates={[m for m in matched]}"
+        )
+        return None
+
+    logger.warning(f"find_client_file: NOT FOUND query={safe_name!r}")
+    return None
+
+
 def send_task_to_claude_code(title: str, task_text: str, tool: str = "code") -> bool:
     """Создаёт задачу для указанного агента в папке Задачи/. Устаревший интерфейс — используй create_task."""
     ok, _ = create_task(title, task_text, tool)
@@ -641,11 +724,11 @@ def create_stripe_payment(client_name: str, amount_usd: float, description: str)
 def record_invoice_in_client_file(client_name: str, amount_usd: float,
                                    description: str, payment_url: str, session_id: str) -> bool:
     """Дописывает инвойс в файл клиента в axiomvoid-vault."""
-    safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', client_name, flags=re.UNICODE)[:60].strip()
-    path      = f"Клиенты/{safe_name}.md"
-    raw       = github_get_file_content(path, repo=AXIOMVOID_REPO)
-    if not raw:
+    result = find_client_file(client_name)
+    if not result:
         return False
+    path, raw = result
+    safe_name = path.removeprefix("Клиенты/").removesuffix(".md")
     date_str = datetime.now().strftime("%Y-%m-%d")
     block = (
         f"\n## Инвойс {date_str}\n"
@@ -2156,14 +2239,11 @@ def _update_client_paid(client_name: str, amount_usd: float) -> None:
     """Обновляет статус клиента на 'оплачено' в его карточке.
     Безопасно: ничего не делает если файл не найден или уже обновлён."""
     try:
-        safe_name = re.sub(r'[^\w\s\-а-яёА-ЯЁ]', '', client_name, flags=re.UNICODE)[:60].strip()
-        if not safe_name:
+        result = find_client_file(client_name)
+        if not result:
             return
-        path = f"Клиенты/{safe_name}.md"
-        raw  = github_get_file_content(path, repo=AXIOMVOID_REPO)
-        if not raw:
-            logger.warning(f"Stripe paid: карточка не найдена → {safe_name!r}")
-            return
+        path, raw = result
+        safe_name = path.removeprefix("Клиенты/").removesuffix(".md")
         updated = re.sub(r'^(status:)\s*\S+', r'\1 оплачено', raw, flags=re.MULTILINE)
         updated = re.sub(r'^(\s*- Статус:)\s*.+$', r'\1 оплачено', updated, flags=re.MULTILINE)
         if updated == raw:
