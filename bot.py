@@ -778,7 +778,7 @@ async def _inv_handle_desc(message, text: str, user_id: int, session: dict):
         f"👤 Клиент: {client_name}\n"
         f"💰 Сумма: ${amount_usd:,.0f}\n"
         f"📝 Услуга: {description}\n\n"
-        f"🔗 *Ссылка на оплату:*\n{pay_url}\n\n"
+        f"🔗 *Ссылка на оплату:*\n[Оплатить инвойс]({pay_url})\n\n"
         f"📄 Obsidian: {obs_status}",
         parse_mode="Markdown"
     )
